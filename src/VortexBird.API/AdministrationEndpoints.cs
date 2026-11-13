@@ -271,7 +271,10 @@ public static class AdministrationEndpoints
         entity.Name = SafeInput.Text(input.Name, "name"); entity.Code = SafeInput.Code(input.Code, "code"); entity.Enabled = input.Enabled; entity.RequestsPerMinute = input.RequestsPerMinute;
     }
     private static void SetChannel(Channel entity, ChannelInput input)
-    { entity.Name = SafeInput.Text(input.Name, "name"); entity.Code = SafeInput.Code(input.Code, "code"); entity.Enabled = input.Enabled; }
+    {
+        if (input.RequestsPerMinute is < 10 or > 100000) throw new RequestInputException("requestsPerMinute debe estar entre 10 y 100000.");
+        entity.Name = SafeInput.Text(input.Name, "name"); entity.Code = SafeInput.Code(input.Code, "code"); entity.Enabled = input.Enabled; entity.RequestsPerMinute = input.RequestsPerMinute;
+    }
     private static void SetProduct(Product entity, ProductInput input)
     { entity.Sku = SafeInput.Code(input.Sku, "sku"); entity.Name = SafeInput.Text(input.Name, "name"); entity.Category = SafeInput.Text(input.Category, "category", 80); entity.Active = input.Active; }
     private static void SetRole(Role entity, RoleInput input)
@@ -364,7 +367,7 @@ internal static class AdminPage
 }
 
 public record PartnerInput(string Name, string Code, bool Enabled = true, int RequestsPerMinute = 120);
-public record ChannelInput(Guid PartnerId, string Name, string Code, bool Enabled = true);
+public record ChannelInput(Guid PartnerId, string Name, string Code, bool Enabled = true, int RequestsPerMinute = 120);
 public record ProductInput(string Sku, string Name, string Category, bool Active = true);
 public record UserInput(string Subject, string Email, string DisplayName, Guid? PartnerId = null, bool Enabled = true, Guid[]? RoleIds = null);
 public record UserRolesInput(Guid[] RoleIds);

@@ -16,6 +16,7 @@ public class Channel
     public string Name { get; set; } = "";
     public string Code { get; set; } = "";
     public bool Enabled { get; set; } = true;
+    public int RequestsPerMinute { get; set; } = 120;
 }
 
 public class Product

@@ -9,6 +9,8 @@ using Microsoft.IdentityModel.Tokens;
 using VortexBird.API;
 using VortexBird.Application.Abstractions;
 using VortexBird.Infrastructure;
+using VortexBird.Infrastructure.Payments;
+using VortexBird.Infrastructure.Messaging;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Logging.ClearProviders();
@@ -27,10 +29,12 @@ builder.Services.AddScoped<IInventoryAdapter, WmsInventoryAdapter>();
 builder.Services.AddScoped<ICustomerAdapter, CrmCustomerAdapter>();
 builder.Services.AddScoped<IOrderManagementAdapter, OmsOrderAdapter>();
 builder.Services.AddScoped<IPaymentGateway, SimulatedPaymentGateway>();
+builder.Services.AddPaymentProcessing(builder.Configuration);
 builder.Services.AddSingleton<ReadCache>();
 builder.Services.AddSingleton<AdapterCircuit>();
-builder.Services.AddSingleton<PartnerQuota>();
-if (builder.Configuration.GetValue("Workers:Enabled", true)) builder.Services.AddHostedService<OutboxWorker>();
+builder.Services.AddScoped<PartnerQuota>();
+builder.Services.AddScoped<IQuotaStore, PostgresQuotaStore>();
+builder.Services.AddIntegrationMessaging(builder.Configuration, builder.Environment);
 builder.Services.AddAuthorization();
 var demo = builder.Configuration.GetValue<bool>("Authentication:DemoEnabled");
 if (demo && !builder.Environment.IsDevelopment()) throw new InvalidOperationException("Demo authentication is forbidden outside Development.");
@@ -88,17 +92,13 @@ app.Use(async (ctx, next) =>
     {
         var actor = ctx.RequestServices.GetRequiredService<HttpActor>();
         await actor.Initialize(ctx.RequestAborted);
-        if (actor.PartnerId.HasValue)
+        var quota = ctx.RequestServices.GetRequiredService<PartnerQuota>();
+        var decision = await quota.TryAcquire(ctx, actor, ctx.RequestAborted);
+        if (!decision.Allowed)
         {
-            var quota = ctx.RequestServices.GetRequiredService<PartnerQuota>();
-            var partnerAllowed = quota.TryAcquire($"partner:{actor.PartnerId}", actor.RequestsPerMinute);
-            var channelsAllowed = actor.ChannelIds.All(channel => quota.TryAcquire($"channel:{actor.PartnerId}:{channel}", actor.RequestsPerMinute));
-            if (!partnerAllowed || !channelsAllowed)
-            {
-                ctx.Response.StatusCode = 429; ctx.Response.Headers.RetryAfter = "60";
-                await ctx.Response.WriteAsJsonAsync(new { type = "urn:vortexbird:error:partner_quota", title = "Cuota de partner/canal agotada", status = 429, detail = "Reintenta en la siguiente ventana.", errorCode = "partner_quota", correlationId = ctx.TraceIdentifier, timestamp = DateTimeOffset.UtcNow }, options: (System.Text.Json.JsonSerializerOptions?)null, contentType: "application/problem+json");
-                return;
-            }
+            ctx.Response.StatusCode = 429; ctx.Response.Headers.RetryAfter = decision.RetryAfterSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            await ctx.Response.WriteAsJsonAsync(new { type = "urn:vortexbird:error:partner_quota", title = "Cuota de partner/canal agotada", status = 429, detail = "Reintenta en la siguiente ventana.", errorCode = "partner_quota", correlationId = ctx.TraceIdentifier, timestamp = DateTimeOffset.UtcNow }, options: (System.Text.Json.JsonSerializerOptions?)null, contentType: "application/problem+json");
+            return;
         }
         string[] partnerWideResources = ["/api/v1/webhooks", "/api/v1/webhook-deliveries", "/api/v1/users", "/api/v1/events", "/api/v1/activity-logs"];
         if (partnerWideResources.Any(prefix => ctx.Request.Path.StartsWithSegments(prefix)) || ctx.Request.Path == "/api/v1/channels" && ctx.Request.Method == "POST") actor.RequireUnrestrictedChannel();
@@ -131,6 +131,8 @@ api.MapGet("/auth/me", (HttpActor actor) => new { user = actor.User, permissions
 api.MapOperationalEndpoints();
 api.MapAdministrationEndpoints();
 api.MapDashboardEndpoints();
+api.MapPaymentEndpoints();
+app.MapMercadoPagoWebhook();
 if (builder.Configuration.GetValue<bool>("Database:Initialize"))
 {
     if (!app.Environment.IsDevelopment()) throw new InvalidOperationException("Automatic schema bootstrap is Development only. Run reviewed migrations in deployment.");

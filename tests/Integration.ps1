@@ -21,7 +21,7 @@ try {
   if (-not $ready) { throw 'API not ready; check test logs.' }
   $login=Invoke-RestMethod "$base/api/v1/auth/demo-login" -Method Post -ContentType application/json -Body (@{email='admin@andesretail.local';password=$env:Demo__Password}|ConvertTo-Json)
   $headers=@{Authorization="Bearer $($login.accessToken)";'Idempotency-Key'=[guid]::NewGuid().ToString()}
-  $request=@{partnerId='11111111-1111-1111-1111-111111111111';channelId='22222222-2222-2222-2222-222222222222';storeId='BOG-01';customerId='CI-CUSTOMER';items=@(@{sku='AND-0001';quantity=1});paymentOutcome='rejected'}
+  $request=@{partnerId='11111111-1111-1111-1111-111111111111';channelId='22222222-2222-2222-2222-222222222222';storeId='BOG-01';customerId='CUST-001';items=@(@{sku='AND-0001';quantity=1});paymentOutcome='rejected'}
   $body=$request|ConvertTo-Json -Depth 5
   $first=Invoke-RestMethod "$base/api/v1/orders" -Method Post -Headers $headers -ContentType application/json -Body $body
   $second=Invoke-RestMethod "$base/api/v1/orders" -Method Post -Headers $headers -ContentType application/json -Body $body

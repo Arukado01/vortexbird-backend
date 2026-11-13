@@ -97,6 +97,154 @@
     {
       "name": "malformed hexadecimal signature rejected",
       "passed": true
+    },
+    {
+      "name": "private callback IP rejected before HTTP",
+      "passed": true
+    },
+    {
+      "name": "preference expires with reservation deadline",
+      "passed": true
+    },
+    {
+      "name": "expired reservation cannot create checkout",
+      "passed": true
+    },
+    {
+      "name": "unknown creation search absent never repeats POST",
+      "passed": true
+    },
+    {
+      "name": "ambiguous existing preferences fail closed",
+      "passed": true
+    },
+    {
+      "name": "lost checkout response recovered with correlated GET",
+      "passed": true
+    },
+    {
+      "name": "search individually verifies every payment and retains duplicate approvals",
+      "passed": true
+    },
+    {
+      "name": "payment search truncation fails closed",
+      "passed": true
+    },
+    {
+      "name": "payment search cannot cross tenant via returned ID",
+      "passed": true
+    },
+    {
+      "name": "refund sends stable key only after verification and rereads outcome",
+      "passed": true
+    },
+    {
+      "name": "refund accepted response alone is not confirmation",
+      "passed": true
+    },
+    {
+      "name": "already refunded payment replay makes no mutation",
+      "passed": true
+    },
+    {
+      "name": "refund refuses unapproved payment",
+      "passed": true
+    },
+    {
+      "name": "refund refuses amount mismatch before mutation",
+      "passed": true
+    },
+    {
+      "name": "valid approval confirms once",
+      "passed": true
+    },
+    {
+      "name": "callback may beat order-created consumer",
+      "passed": true
+    },
+    {
+      "name": "late approval after cancellation refunds",
+      "passed": true
+    },
+    {
+      "name": "approval with expired reservation refunds",
+      "passed": true
+    },
+    {
+      "name": "duplicate approved provider payment refunds",
+      "passed": true
+    },
+    {
+      "name": "accepted payment replay does not consume again",
+      "passed": true
+    },
+    {
+      "name": "late pending cannot downgrade approved",
+      "passed": true
+    },
+    {
+      "name": "late rejection cannot downgrade approved",
+      "passed": true
+    },
+    {
+      "name": "old approval cannot undo refund",
+      "passed": true
+    },
+    {
+      "name": "old approval cannot undo chargeback",
+      "passed": true
+    },
+    {
+      "name": "pending rejection cancels and releases",
+      "passed": true
+    },
+    {
+      "name": "other failed payment cannot cancel accepted order",
+      "passed": true
+    },
+    {
+      "name": "authoritative refund triggers compensation",
+      "passed": true
+    },
+    {
+      "name": "duplicate refund cannot restock twice",
+      "passed": true
+    },
+    {
+      "name": "chargeback requires review",
+      "passed": true
+    },
+    {
+      "name": "valid signed notification produces minimal durable receipt",
+      "passed": true
+    },
+    {
+      "name": "equivalent signature encodings dedupe to same manifest",
+      "passed": true
+    },
+    {
+      "name": "callback rejects unsigned body identity mismatch",
+      "passed": true
+    },
+    {
+      "name": "callback rejects production and foreign seller envelopes",
+      "passed": true
+    },
+    {
+      "name": "callback rejects malformed oversized and unrelated topics",
+      "passed": true
+    },
+    {
+      "name": "browser or body approval is not accepted as payment evidence",
+      "passed": true
+    },
+    {
+      "name": "default registration keeps external adapter disabled",
+      "passed": true
+    },
+    {
+      "name": "sandbox registration requires explicit enable and credentials",
+      "passed": true
     }
   ]
 }

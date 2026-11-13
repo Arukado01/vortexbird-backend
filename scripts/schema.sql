@@ -664,6 +664,224 @@ START TRANSACTION;
 
 DO $EF$
 BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261113193907_PersistentPaymentsAndQuotas') THEN
+    DROP INDEX "IX_Payments_OrderId";
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261113193907_PersistentPaymentsAndQuotas') THEN
+    ALTER TABLE "Channels" ADD "RequestsPerMinute" integer NOT NULL DEFAULT 120;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261113193907_PersistentPaymentsAndQuotas') THEN
+    ALTER TABLE "Orders" ADD CONSTRAINT "AK_Orders_Id_PartnerId_ChannelId" UNIQUE ("Id", "PartnerId", "ChannelId");
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261113193907_PersistentPaymentsAndQuotas') THEN
+    CREATE TABLE "PaymentCheckouts" (
+        "OrderId" uuid NOT NULL,
+        "PartnerId" uuid NOT NULL,
+        "ChannelId" uuid NOT NULL,
+        "State" character varying(2048) NOT NULL,
+        "ExternalReference" character varying(2048) NOT NULL,
+        "ExpectedAmount" numeric(18,2) NOT NULL,
+        "Currency" character varying(2048) NOT NULL,
+        "PreferenceId" character varying(2048),
+        "CheckoutUrl" character varying(2048),
+        "AcceptedPaymentId" character varying(2048),
+        "ExpiresAt" timestamp with time zone NOT NULL,
+        "LeaseId" uuid,
+        "LeaseUntil" timestamp with time zone,
+        "Attempts" integer NOT NULL,
+        "LastError" character varying(2048),
+        "NextAttemptAt" timestamp with time zone NOT NULL,
+        "CreatedAt" timestamp with time zone NOT NULL,
+        "UpdatedAt" timestamp with time zone NOT NULL,
+        CONSTRAINT "PK_PaymentCheckouts" PRIMARY KEY ("OrderId"),
+        CONSTRAINT ck_checkout_amount CHECK ("ExpectedAmount" > 0 AND "Currency" = 'COP'),
+        CONSTRAINT "FK_PaymentCheckouts_Orders_OrderId_PartnerId_ChannelId" FOREIGN KEY ("OrderId", "PartnerId", "ChannelId") REFERENCES "Orders" ("Id", "PartnerId", "ChannelId") ON DELETE RESTRICT
+    );
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261113193907_PersistentPaymentsAndQuotas') THEN
+    CREATE TABLE "PaymentInbox" (
+        "Id" uuid NOT NULL,
+        "NotificationKey" character varying(2048) NOT NULL,
+        "ProviderPaymentId" character varying(2048) NOT NULL,
+        "Status" character varying(2048) NOT NULL,
+        "Attempts" integer NOT NULL,
+        "LeaseId" uuid,
+        "LeaseUntil" timestamp with time zone,
+        "NextAttemptAt" timestamp with time zone NOT NULL,
+        "LastError" character varying(2048),
+        "CreatedAt" timestamp with time zone NOT NULL,
+        "ProcessedAt" timestamp with time zone,
+        CONSTRAINT "PK_PaymentInbox" PRIMARY KEY ("Id")
+    );
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261113193907_PersistentPaymentsAndQuotas') THEN
+    CREATE TABLE "QuotaCounters" (
+        "PartnerId" uuid NOT NULL,
+        "BudgetKey" character varying(2048) NOT NULL,
+        "Minute" bigint NOT NULL,
+        "Count" integer NOT NULL,
+        CONSTRAINT "PK_QuotaCounters" PRIMARY KEY ("PartnerId", "BudgetKey"),
+        CONSTRAINT ck_quota_count CHECK ("Count" >= 0),
+        CONSTRAINT "FK_QuotaCounters_Partners_PartnerId" FOREIGN KEY ("PartnerId") REFERENCES "Partners" ("Id") ON DELETE CASCADE
+    );
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261113193907_PersistentPaymentsAndQuotas') THEN
+    CREATE TABLE "PaymentReceipts" (
+        "ProviderPaymentId" character varying(2048) NOT NULL,
+        "OrderId" uuid NOT NULL,
+        "ProviderStatus" character varying(2048) NOT NULL,
+        "Disposition" character varying(2048) NOT NULL,
+        "UpdatedAt" timestamp with time zone NOT NULL,
+        CONSTRAINT "PK_PaymentReceipts" PRIMARY KEY ("ProviderPaymentId"),
+        CONSTRAINT "FK_PaymentReceipts_PaymentCheckouts_OrderId" FOREIGN KEY ("OrderId") REFERENCES "PaymentCheckouts" ("OrderId") ON DELETE RESTRICT
+    );
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261113193907_PersistentPaymentsAndQuotas') THEN
+    CREATE UNIQUE INDEX "IX_Payments_OrderId" ON "Payments" ("OrderId");
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261113193907_PersistentPaymentsAndQuotas') THEN
+    ALTER TABLE "Channels" ADD CONSTRAINT ck_channel_quota CHECK ("RequestsPerMinute" >= 10 AND "RequestsPerMinute" <= 100000);
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261113193907_PersistentPaymentsAndQuotas') THEN
+    CREATE UNIQUE INDEX "IX_PaymentCheckouts_ExternalReference" ON "PaymentCheckouts" ("ExternalReference");
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261113193907_PersistentPaymentsAndQuotas') THEN
+    CREATE INDEX "IX_PaymentCheckouts_NextAttemptAt_LeaseUntil" ON "PaymentCheckouts" ("NextAttemptAt", "LeaseUntil");
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261113193907_PersistentPaymentsAndQuotas') THEN
+    CREATE INDEX "IX_PaymentCheckouts_OrderId_PartnerId_ChannelId" ON "PaymentCheckouts" ("OrderId", "PartnerId", "ChannelId");
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261113193907_PersistentPaymentsAndQuotas') THEN
+    CREATE UNIQUE INDEX "IX_PaymentCheckouts_PreferenceId" ON "PaymentCheckouts" ("PreferenceId");
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261113193907_PersistentPaymentsAndQuotas') THEN
+    CREATE UNIQUE INDEX "IX_PaymentInbox_NotificationKey" ON "PaymentInbox" ("NotificationKey");
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261113193907_PersistentPaymentsAndQuotas') THEN
+    CREATE INDEX "IX_PaymentInbox_Status_NextAttemptAt" ON "PaymentInbox" ("Status", "NextAttemptAt");
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261113193907_PersistentPaymentsAndQuotas') THEN
+    CREATE INDEX "IX_PaymentReceipts_OrderId_Disposition" ON "PaymentReceipts" ("OrderId", "Disposition");
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261113193907_PersistentPaymentsAndQuotas') THEN
+    INSERT INTO "__EFMigrationsHistory" ("MigrationId", "ProductVersion")
+    VALUES ('20261113193907_PersistentPaymentsAndQuotas', '10.0.12');
+    END IF;
+END $EF$;
+COMMIT;
+
+START TRANSACTION;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261113194822_DurableMessagingAndReconciliation') THEN
+    ALTER TABLE "PaymentCheckouts" ADD "ReconcileRequested" boolean NOT NULL DEFAULT FALSE;
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261113194822_DurableMessagingAndReconciliation') THEN
+    CREATE TABLE "MessagingInbox" (
+        "EventId" uuid NOT NULL,
+        "Consumer" character varying(2048) NOT NULL,
+        "PartnerId" uuid NOT NULL,
+        "PayloadHash" character varying(2048) NOT NULL,
+        "Status" character varying(2048) NOT NULL,
+        "LeaseId" character varying(2048) NOT NULL,
+        "LeaseUntil" timestamp with time zone NOT NULL,
+        "ReceivedAt" timestamp with time zone NOT NULL,
+        "CompletedAt" timestamp with time zone,
+        "Attempts" integer NOT NULL,
+        CONSTRAINT "PK_MessagingInbox" PRIMARY KEY ("EventId", "Consumer")
+    );
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261113194822_DurableMessagingAndReconciliation') THEN
+    CREATE INDEX "IX_MessagingInbox_Status_LeaseUntil" ON "MessagingInbox" ("Status", "LeaseUntil");
+    END IF;
+END $EF$;
+
+DO $EF$
+BEGIN
+    IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261113194822_DurableMessagingAndReconciliation') THEN
+    INSERT INTO "__EFMigrationsHistory" ("MigrationId", "ProductVersion")
+    VALUES ('20261113194822_DurableMessagingAndReconciliation', '10.0.12');
+    END IF;
+END $EF$;
+COMMIT;
+
+START TRANSACTION;
+
+DO $EF$
+BEGIN
     IF NOT EXISTS(SELECT 1 FROM "__EFMigrationsHistory" WHERE "MigrationId" = '20261113235959_ReportingViews') THEN
     CREATE VIEW vw_dashboard_order_metrics AS SELECT "PartnerId", "ChannelId", ("CreatedAt" AT TIME ZONE 'UTC')::date AS day, count(*) AS orders, sum("Total") AS gross_total FROM "Orders" GROUP BY 1,2,3;
     CREATE VIEW vw_inventory_summary AS SELECT "PartnerId", "ChannelId", "StoreId", count(*) AS skus, sum("OnHand") AS on_hand, sum("Reserved") AS reserved, sum("OnHand"-"Reserved") AS available FROM "Stocks" GROUP BY 1,2,3;

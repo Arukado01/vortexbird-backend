@@ -112,12 +112,18 @@ public static class OperationalEndpoints
         api.MapPost("/orders/{id:guid}/status", async (Guid id, OrderStatusInput input, IntegrationDbContext db, HttpActor actor, CancellationToken ct) =>
         {
             await actor.Require("orders.update", ct);
+            await using var transaction = await db.Database.BeginTransactionAsync(ct);
+            await VortexBird.Infrastructure.Payments.PaymentCheckoutService.LockOrder(db, id, ct);
             var order = await db.Orders.Include(x => x.Timeline).SingleOrDefaultAsync(x => x.Id == id, ct) ?? throw new MissingEntityException("Orden no encontrada.");
             await actor.EnsurePartnerAccess(order.PartnerId, order.ChannelId, ct);
             if (input.Status is not (OrderStates.Shipped or OrderStates.Delivered)) throw new RequestInputException("Solo se admite shipped o delivered.");
+            if (input.Status == OrderStates.Shipped && order.PaymentStatus != PaymentStates.Approved)
+                throw new DomainException("payment_not_approved", "El despacho requiere un pago aprobado y sin reversión pendiente.");
             order.TransitionTo(input.Status, "Actualización de fulfillment simulado.", DateTimeOffset.UtcNow);
             db.OutboxMessages.Add(new OutboxMessage { PartnerId = order.PartnerId, CorrelationId = actor.CorrelationId, Type = input.Status == OrderStates.Shipped ? "shipment.started" : "delivery.confirmed", Payload = JsonSerializer.Serialize(new { orderId = order.Id, status = order.Status }) });
-            await db.SaveChangesAsync(ct); return Results.Ok(order);
+            await db.SaveChangesAsync(ct);
+            await transaction.CommitAsync(ct);
+            return Results.Ok(order);
         });
         api.MapGet("/payments", async (IntegrationDbContext db, HttpActor actor, HttpRequest request, CancellationToken ct) =>
         {
@@ -179,11 +185,18 @@ public static class OperationalEndpoints
         api.MapPost("/events/{id:guid}/retry", async (Guid id, IntegrationDbContext db, HttpActor actor, CancellationToken ct) =>
         {
             await actor.Require("events.manage", ct);
-            var message = await db.OutboxMessages.SingleOrDefaultAsync(x => x.Id == id, ct) ?? throw new MissingEntityException("Evento no encontrado.");
+            await using var transaction = await db.Database.BeginTransactionAsync(ct);
+            var message = await db.OutboxMessages.FromSqlInterpolated($"SELECT * FROM \"OutboxMessages\" WHERE \"Id\" = {id} FOR UPDATE").SingleOrDefaultAsync(ct) ?? throw new MissingEntityException("Evento no encontrado.");
             await actor.EnsurePartnerAccess(message.PartnerId, cancellationToken: ct);
             if (message.Status != "dead_letter") throw new RequestInputException("Solo se reintentan eventos de DLQ.");
+            await db.Set<VortexBird.Infrastructure.Messaging.MessagingInbox>()
+                .Where(x => x.EventId == id && x.PartnerId == message.PartnerId && x.Status == "dead_letter")
+                .ExecuteUpdateAsync(s => s.SetProperty(x => x.Status, "pending").SetProperty(x => x.Attempts, 0)
+                    .SetProperty(x => x.LeaseId, "").SetProperty(x => x.LeaseUntil, DateTimeOffset.UtcNow), ct);
             message.Status = "pending"; message.Attempts = 0; message.NextAttemptAt = DateTimeOffset.UtcNow; message.LastError = null;
-            await db.SaveChangesAsync(ct); return Results.Ok(message);
+            await db.SaveChangesAsync(ct);
+            await transaction.CommitAsync(ct);
+            return Results.Ok(message);
         });
         api.MapGet("/webhook-deliveries", async (IntegrationDbContext db, HttpActor actor, HttpRequest request, CancellationToken ct) =>
         {

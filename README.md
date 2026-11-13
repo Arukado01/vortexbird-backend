@@ -32,6 +32,10 @@ El worker procesa `order.created`, llama `IPaymentGateway` fuera de la transacci
 
 El outbox usa `FOR UPDATE SKIP LOCKED`, leases con token de propiedad, reintentos exponenciales+jitter, cinco intentos y estado `dead_letter`. Los consumidores deduplican por evento+consumidor. Las entregas HTTP son at-least-once: el receptor debe deduplicar `X-Event-Id`. Una suscripción exige HTTPS/dominio público/puerto443; se valida DNS en la conexión para bloquear SSRF y no se siguen redirects. La firma es HMAC-SHA256 de `timestamp.payload`; el secreto se devuelve solo al crear la suscripción.
 
+`Messaging__Provider=sqs` habilita publicación y consumo SQS con AWS Core, credenciales de runtime, SigV4 e inbox persistente. Solo se confirma el mensaje después del resultado durable; un evento debe coincidir con su outbox canónico. El proveedor predeterminado es `local`. Configuración, emulador, recuperación y límites están en `README-messaging.md`.
+
+El proveedor opcional `MercadoPagoSandbox` guarda checkout e inbox, consulta el resultado autoritativo y concilia pagos duplicados o tardíos. El retorno del navegador no aprueba una orden. Las credenciales deben pertenecer a una cuenta de prueba verificada; `README-payments.md` describe habilitación, callbacks y compensaciones.
+
 ## API principal
 
 | Recurso | Operaciones |
@@ -44,6 +48,9 @@ El outbox usa `FOR UPDATE SKIP LOCKED`, leases con token de propiedad, reintento
 | `/pricing`, `/pricing/quote`, `/pricing/{id}` | Listado, cotización efectiva por cliente, precio |
 | `/orders`, `/orders/{id}`, `/orders/{id}/cancel`, `/orders/{id}/status` | Crear/consultar, compensar, despacho/entrega |
 | `/payments`, `/payments/{id}/simulate` | Consultar y resolver pagos pendientes del simulador |
+| `/payments/orders/{orderId}/checkout`, `/payments/orders/{orderId}/reconcile` | Consultar checkout y solicitar conciliación sandbox autorizada |
+| `/payments/inbox`, `/payments/inbox/{id}/retry` | Revisar y reintentar notificaciones fallidas con autorización global |
+| `/payments/mercadopago/webhook` | Callback firmado, limitado y persistido antes de confirmar recepción |
 | `/integrations`, `/integrations/{id}/test`, `/integrations/oms/orders` | Estado, fallos controlados y réplica OMS |
 | `/events`, `/events/{id}/retry`, `/webhooks`, `/webhook-deliveries` | Outbox, DLQ y suscripciones |
 | `/activity-logs`, `/dashboard`, `/settings` | Auditoría filtrada, agregaciones SQL y configuración de lectura |
@@ -52,9 +59,9 @@ Listas: `page`, `pageSize` (máximo100), `search` donde aplica; respuesta `items
 
 ## Caché y operación
 
-`/inventory/stock` usa Redis TTL10s; `/pricing/quote` TTL60s con clave por partner+canal+SKU+cliente. Crear una orden consulta las fuentes autoritativas sin confiar en stock/precio cacheados. Redis no disponible provoca fallback a PostgreSQL; no devuelve stock inventado. El cliente RESP incluido es mínimo para la demo TCP local; sustituir por un cliente Redis mantenido con TLS/pooling/telemetría antes de conectar ElastiCache productivo. Los bulkheads limitan16 llamadas simultáneas por adaptador y el circuito abre30s tras tres fallos.
+`/inventory/stock` usa Redis TTL10s; `/pricing/quote` TTL60s con clave por partner+canal+SKU+cliente. Crear una orden consulta las fuentes autoritativas sin confiar en stock/precio cacheados. Redis no disponible provoca fallback a PostgreSQL; no devuelve stock inventado. El cliente RESP2 valida longitudes y UTF-8, admite `rediss://`, AUTH y selección de base; fuera de Development exige TLS y credenciales. No omite la validación del certificado. Pooling y validación real con ElastiCache siguen pendientes. Los bulkheads limitan16 llamadas simultáneas por adaptador y el circuito abre30s tras tres fallos.
 
-Los logs JSON incluyen correlation-id/request-id y duración; se crean `ActivitySource` y `Meter` para instrumentación. Auditoría append-only desde todas las sobrecargas SaveChanges y sin cuerpos, tokens o credenciales. El rate limiter en proceso protege login/API y aplica `RequestsPerMinute` del partner habilitado, compartiendo cuota entre sus identidades y limitando también canales del token. Los límites distribuidos entre réplicas deben completarse en gateway/Redis antes de escalar horizontalmente.
+Los logs JSON incluyen correlation-id/request-id y duración; se crean `ActivitySource` y `Meter` para instrumentación. Auditoría append-only desde todas las sobrecargas SaveChanges y sin cuerpos, tokens o credenciales. Un límite local protege login/API. Además, los presupuestos configurables de partner/canal se consumen atómicamente en PostgreSQL usando el reloj de DB y un lock por partner. Las consultas agregadas consumen sus canales autorizados; un error DB no deshabilita las cuotas. Falta medir concurrencia y contención entre réplicas.
 
 ## Pruebas
 
@@ -67,14 +74,16 @@ dotnet run --project tests/VortexBird.Tests --no-build
 
 Se comprobaron24 invariantes de dominio/validación y19 de arquitectura, autorización, idempotencia, índices/FKs y SSRF. Las verificaciones HTTP adicionales usan TestServer sin red y mantienen la validación real JWT. `tests/Integration.ps1` prueba API+PostgreSQL, replay, conflicto de payload y compensación; requiere una base dedicada. CI levanta PostgreSQL y ejecuta ese escenario. No se presenta una prueba contra un servidor PostgreSQL inaccesible como aprobada. Los resultados ampliados están en el repositorio de documentación.
 
+La revisión final pasó también 50 controles de seguridad, 21 de API/JWT/callbacks, 61 de pagos, 17 de cuotas, 32 de Redis, 20 de mensajería y nueve del pipeline oficial AWS Core. Son 253 comprobaciones backend con transporte controlado o sin red; no equivalen a probar proveedores desplegados. `../verify.ps1` ejecuta estas suites y las 15 comprobaciones frontend.
+
 En el entorno restringido actual se restauraron dependencias desde el cache disponible; `dotnet build -m:1 -nr:false -p:UseSharedCompilation=false` evita problemas de build-server. Si el directorio personal no es escribible, define `DOTNET_CLI_HOME` en un directorio de trabajo.
 
 ## Estado y límites explícitos
 
 - PostgreSQL, EF, migraciones, autorización, CQRS, saga, outbox/DLQ local, ACLs persistidos y portal están implementados. Entornos/proveedores externos no se presentan como conectados.
-- La cola ejecutable predeterminada es el outbox PostgreSQL. SQS es el objetivo AWS, aún necesita transporte desplegado/verificación real.
+- El transporte local y el opcional SQS están implementados. El consumidor SQS con PostgreSQL externo, ElasticMQ y AWS todavía requiere verificación integrada.
 - No se descargaron Serilog, FluentValidation ni OpenTelemetry SDK por restricciones de red; se usan logging JSON, validadores de aplicación y Activity/Meter de .NET. No se afirma haber instalado esas librerías.
-- Mercado Pago requiere credenciales verificadas de prueba y una URL HTTPS de callbacks; el simulador no equivale a validación con el proveedor. Consulta la documentación del adaptador sandbox si está incluida.
+- El checkout Mercado Pago sandbox está integrado en código, pero requiere credenciales verificadas de prueba y una URL HTTPS de callbacks. El simulador y el HTTP controlado no equivalen a validación externa. Consulta `README-payments.md`.
 - Los secretos de webhooks están restringidos en API pero aún requieren cifrado en reposo por aplicación/KMS antes de producción. No usar credenciales reales en esta demo.
 - No se han medido 99.9%, p95<300ms ni tráfico10x. Los escenarios de carga y el plan AWS se entregan para ejecutarlos en un entorno habilitado.
 - Los workflows de despliegue requieren OIDC IAM, repositorios ECR, cluster y environment GitHub configurados. Ningún workflow de este árbol autoriza por sí mismo crear infraestructura facturable.

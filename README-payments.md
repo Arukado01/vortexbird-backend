@@ -1,52 +1,71 @@
-# Piloto de Mercado Pago en ambiente de pruebas
+# Mercado Pago sandbox: checkout, recepción y conciliación
 
-## Estado real
+El flujo está implementado y conectado a `IPaymentGateway`, conservando **Simulator como configuración predeterminada**. No se activó Mercado Pago, no se usaron credenciales reales y no se hizo ningún pago externo. La evidencia disponible comprende compilación, transporte HTTP controlado, reglas de transición y pruebas del límite HTTP; no equivale a una sesión de sandbox ni a pruebas de concurrencia contra PostgreSQL desplegado.
 
-`Infrastructure/Payments/MercadoPagoSandboxClient.cs` implementa llamadas HTTP reales para crear una preferencia de Checkout Pro y consultar un pago, con controles de vendedor, modo de pruebas y correlación. `MercadoPagoWebhookSignature.cs` verifica la firma HMAC del aviso. Las pruebas usan un transporte HTTP controlado: **no se contactó Mercado Pago y no se ejecutó ningún pago**.
+## Flujo implementado
 
-El piloto está aislado y **no reemplaza `IPaymentGateway`**, no se registra automáticamente y no expone un webhook público. La saga de la aplicación continúa usando el simulador explícito. Esta separación es deliberada: un checkout alojado necesita persistir su URL, referencia y estado incierto, recibir notificaciones durables y reconciliar resultados antes de consumir inventario. No basta con cambiar un nombre en configuración.
+1. La orden y sus reservas se crean atómicamente con `order.created`. El consumidor llama la saga. El proveedor externo ignora `SimulationOutcome`; ese campo solo afecta al simulador.
+2. Antes del POST de preferencias se guardan `PaymentCheckout` y `Payment` con la referencia `partnerId:orderId`, importe y moneda del servidor, vencimiento de reserva y lease. Un bloqueo transaccional por orden impide crear dos intenciones.
+3. Se comprueba `/users/me`: ID configurado y etiqueta `test_user`. El prefijo `APP_USR` no identifica una cuenta de pruebas. Solo entonces se crea el checkout alojado, con vencimiento de hasta quince minutos, sin recibir datos de tarjeta.
+4. La URL se persiste y solo se expone mientras la orden tiene reserva/pago pendiente y no ha expirado. Si se pierde la respuesta, queda `unknown`. **El POST no se repite**: la búsqueda por referencia recupera y verifica preferencia, vendedor, importe, moneda y vencimiento. Ausencia o ambigüedad nunca autoriza otra creación automática.
+5. El webhook valida HMAC, timestamp, `data.id`, topic, vendedor y modo de pruebas. Persiste una inbox mínima antes de responder HTTP 200. La clave única deriva del manifest firmado canónico: variantes equivalentes de la firma deduplican.
+6. El worker consulta el pago autoritativo, exige `live_mode=false`, vendedor, ID, importe, COP y referencia exactos, y aplica el resultado bajo el mismo bloqueo de orden. Una notificación o retorno del navegador nunca confirma un pago.
+7. Una aprobación válida consume inventario una sola vez y genera outbox `payment.approved` y `order.confirmed`. El rechazo libera reservas. Una aprobación tardía, sin reserva válida o de un segundo pago genera un intento durable de reembolso; no consume existencias de nuevo.
+8. El reembolso verifica el pago antes del POST, utiliza clave de idempotencia estable por orden/pago y vuelve a consultar después. Solo `refunded` del recurso autoritativo confirma compensación. Un crash o timeout conserva `refund_pending` y permite reintentar con la misma clave.
 
-## Controles implementados
+`PaymentReceipt` conserva cada pago independientemente: el segundo pago aprobado se reembolsa sin cancelar el primero aceptado. Estados pendientes/rechazados fuera de orden no degradan aprobaciones; una aprobación antigua no revierte un reembolso. Un reembolso antes del despacho restituye las reservas comprometidas una vez y cancela la orden. Si ya hubo despacho/entrega, no repone inventario automáticamente: el checkout queda en revisión. Los contracargos requieren revisión operativa.
 
-- Habilitación explícita mediante `MercadoPagoSandboxOptions.Enabled`; sin token o vendedor esperado, falla antes de enviar HTTP.
-- Antes de crear una preferencia, consulta `GET https://api.mercadolibre.com/users/me`. El ID debe coincidir con el vendedor configurado y `tags` debe contener `test_user`. Una cuenta real no pasa este control.
-- No se identifica una credencial de prueba por su prefijo. La documentación actual indica que Checkout Pro puede entregar credenciales `APP_USR` para vendedores de prueba.
-- La preferencia usa importe y moneda calculados por el backend. La referencia vincula partner y orden; el cliente no debe fijar el importe desde un formulario.
-- El checkout se devuelve solo si su URL pertenece a los hosts HTTPS de Mercado Pago permitidos y la preferencia corresponde al vendedor esperado.
-- La consulta autoritativa de pago exige `live_mode=false`, vendedor, ID, importe, moneda y referencia exactos. Un aviso o redirect del navegador jamás confirma un pago por sí solo.
-- La firma exige `x-signature`, `x-request-id` y el `data.id` numérico del query string. Compara HMAC-SHA256 en tiempo constante; rechaza campos duplicados, digest inválido y avisos fuera de una ventana configurable de cinco minutos. Admite timestamps en segundos o milisegundos.
-- El registro opcional `AddMercadoPagoSandboxPilot` configura timeout de diez segundos y deshabilita redirects HTTP. No registra `IPaymentGateway`.
-- No recibe ni guarda PAN/CVV; no imprime tokens ni cuerpos de error del proveedor. No reintenta un POST de preferencias: un timeout requiere estado incierto y reconciliación, no una segunda creación automática.
+## Endpoints
 
-La ventana de firma reduce replay temporal, pero **no reemplaza una inbox persistente con unicidad por evento**. Un webhook legítimo puede duplicarse durante la ventana. El receptor futuro debe persistir, confirmar recepción y procesar idempotentemente.
+| Endpoint | Acceso y resultado |
+|---|---|
+| `GET /api/v1/payments/orders/{orderId}/checkout` | `payments.read` y alcance partner/canal; `{orderId,provider,status,checkoutUrl,expiresAt,paymentStatus,canRetry:false}` |
+| `POST /api/v1/payments/orders/{orderId}/reconcile` | `payments.manage` y alcance partner/canal; reprograma conciliación durable, devuelve 202 con el mismo DTO, sin declarar aprobación |
+| `POST /api/v1/payments/mercadopago/webhook?data.id={paymentId}` | Sin JWT; exige `x-signature` y `x-request-id`; deshabilitado=404, firma inválida=401, envelope inválido=400, más de 32 KiB=413 |
+| `GET /api/v1/payments/inbox` | Operador global con `payments.manage`; inspecciona dead-letter sin cuerpos ni secretos |
+| `POST /api/v1/payments/inbox/{id}/retry` | Operador global con `payments.manage`; reprograma una recepción agotada si sandbox está habilitado |
 
-## Configuración para una integración posterior
+Proveedor en DTO: `simulator` o `mercadopago-sandbox`. Estados externos: `creating`, `pending`, `unknown`, `approved`, `cancelled`, `refund_pending`, `refunded`, `manual_review`. La URL es utilizable con `pending` y pago pendiente. Hosts permitidos: `www.mercadopago.com.co`, `www.mercadopago.com` y `sandbox.mercadopago.com`, siempre HTTPS443 sin credenciales ni fragmento.
 
-Guardar el token y el secreto de firma fuera de Git, mediante variables de entorno en desarrollo o Secrets Manager. Registrar explícitamente el cliente solo después de completar la persistencia y el receptor. El objeto de opciones requiere `AccessToken`, `ExpectedTestSellerId`, `NotificationUrl` HTTPS y `ReturnUrl` HTTPS; no contiene credenciales predeterminadas.
+## Registro y configuración
 
-Antes de activar el flujo:
+`AddPaymentProcessing(configuration)` se registra después del gateway simulado; `api.MapPaymentEndpoints()` agrega rutas autenticadas y `app.MapMercadoPagoWebhook()` agrega recepción firmada. El modelo incorpora `PaymentModelConfiguration.ConfigurePayments(b)` y migraciones. El proveedor no se activa desde el frontend.
 
-1. Crear o seleccionar vendedor y comprador de prueba y comprobar la API/país habilitados en la cuenta.
-2. Añadir persistencia de preferencia, URL y estado `PaymentUnknown`, enlazada con idempotencia de orden.
-3. Añadir inbox de notificaciones: validar firma y tópico `payment`, persistir el aviso sin confiar en su estado y consultar `ReadVerifiedPayment`.
-4. Aplicar el resultado verificado en la saga mediante una transición idempotente. Reembolsos, pagos inciertos y eventos fuera de orden requieren un caso de uso propio; no están implementados en este piloto.
-5. Ejecutar pruebas externas con credenciales de prueba, incluida rotación de secreto, duplicados, timeout y reconciliación. Mantener el simulador como configuración predeterminada hasta verificarlas.
+| Variable | Valor o propósito |
+|---|---|
+| `Payments__Provider` | `Simulator` por defecto; `MercadoPagoSandbox` para activación explícita |
+| `Payments__Sandbox__Enabled` | Debe ser `true`, además del proveedor seleccionado; configuración incompleta impide iniciar |
+| `Payments__Sandbox__AccessToken` | Credencial del vendedor de prueba, suministrada mediante almacén de secretos |
+| `Payments__Sandbox__ExpectedTestSellerId` | ID positivo del vendedor de prueba esperado |
+| `Payments__Sandbox__WebhookSecret` | Secreto de firma de la aplicación, mínimo 32 caracteres; nunca versionar |
+| `Payments__Sandbox__NotificationUrl` | URL HTTPS pública exacta del endpoint de recepción |
+| `Payments__Sandbox__ReturnUrl` | URL HTTPS pública del frontend; el retorno solo permite consultar estado |
+| `Workers__Enabled` | Habilitado para consumir inbox y ejecutar conciliación |
 
-El proveedor recomienda Orders API para nuevas integraciones. Este piloto implementa Preferences API como demostración aislada del contrato de checkout alojado; antes de producción debe evaluarse la migración y disponibilidad en Colombia. No se declara equivalencia con una integración productiva certificada.
+El cliente rechaza URLs HTTP, IP literales, localhost, dominios internos y destinos con credenciales/fragmentos; deshabilita redirects HTTP y limita cada solicitud a diez segundos. No registra tokens ni cuerpos de error del proveedor. Respuestas limitadas a 128 KiB. La búsqueda acepta hasta 50 resultados completos y verifica cada pago por ID; exceso, inconsistencias o referencias ajenas fallan hacia revisión.
 
-## Pruebas reproducibles
+El worker usa leases de dos minutos para inbox y tres para checkout, deadlines menores y finalización condicionada al token. Reintenta con backoff exponencial limitado a quince minutos; doce fallos consecutivos producen dead-letter o revisión manual. El polling automático cubre treinta días: cada treinta segundos con reserva vigente y cada cinco minutos después. Webhooks y conciliación solicitada por operador permiten recuperar órdenes más antiguas. Un POST incierto sin preferencia encontrada mantiene `unknown`; la expiración de reserva cancela la orden y una aprobación posterior se reembolsa. Las búsquedas externas tienen ventanas de retención propias y pueden exigir revisión manual.
+
+## Validación y límites reales
 
 ```powershell
+dotnet restore tests/PaymentChecks/PaymentChecks.csproj
 dotnet run --project tests/PaymentChecks -- --report=tests/PaymentChecks/results.json
 ```
 
-La suite compila directamente los archivos del adaptador y valida comportamiento HTTP, rechazo de vendedores reales, correlación del pago, destinos de checkout y firmas. No usa una copia de las reglas de producción ni necesita paquetes adicionales.
+`PaymentChecks` referencia infraestructura real. Comprueba vendedor de prueba, prohibición de pagos live, correlación, expiración, recuperación sin POST, búsquedas completas, duplicados, reembolso con clave estable y lectura posterior, HMAC/replay canónico, transiciones monotónicas y configuración deshabilitada. Usa `HttpMessageHandler` controlado y reglas de producción; **no ejecuta la saga contra PostgreSQL ni contacta Mercado Pago**. `ApiBoundaryChecks` verifica rechazos HTTP con TestServer. La validación del esquema SQL se reporta por separado en infraestructura.
 
-## Fuentes oficiales verificadas el 13 de noviembre de 2026
+Para validar una sesión externa aún se requieren vendedor/comprador de prueba habilitados para Colombia, credenciales/secretos de esa aplicación, endpoints HTTPS accesibles y ejecutar checkout→webhook→consulta→compensación contra la cuenta de prueba. También corresponde ejecutar carreras de callbacks/cancelación/despacho sobre PostgreSQL antes del despliegue. Estas verificaciones dependen de infraestructura/cuenta; el flujo de implementación está disponible.
 
-- [Cuentas de prueba y prefijo de las credenciales](https://www.mercadopago.com.co/developers/es/docs/checkout-pro-preferences/test-accounts)
-- [Consulta de identidad y etiqueta test_user](https://developers.mercadolibre.com.co/consulta-usuarios)
-- [Crear una preferencia](https://www.mercadopago.com.co/developers/en/reference/online-payments/checkout-pro-preferences/create-preference/post)
-- [Notificaciones: firma, recurso y consulta autoritativa](https://www.mercadopago.com.co/developers/es/docs/checkout-pro-orders/resources/notifications/webhooks)
-- [Manifest de firma HMAC](https://www.mercadopago.com.co/developers/es/docs/checkout-api-orders/optional-notifications)
-- [Referencia y recomendación de Orders API](https://www.mercadopago.com.co/developers/es/reference/online-payments/checkout-pro-orders/overview)
+Se eligió Checkout Pro Preferences para materializar el contrato de checkout alojado. El proveedor también recomienda Orders API para nuevas integraciones; se debe revisar disponibilidad y migración para uso productivo. No se declara certificación productiva ni sandbox externo verificado.
+
+## Referencias oficiales
+
+- [Cuentas de prueba](https://www.mercadopago.com.co/developers/es/docs/checkout-pro-preferences/test-accounts)
+- [Identidad y test_user](https://developers.mercadolibre.com.co/consulta-usuarios)
+- [Crear preferencia](https://www.mercadopago.com.co/developers/en/reference/online-payments/checkout-pro-preferences/create-preference/post)
+- [Buscar preferencias](https://www.mercadopago.com.co/developers/en/reference/online-payments/checkout-pro-preferences/search-preferences/get)
+- [Buscar pagos](https://www.mercadopago.com.co/developers/en/reference/online-payments/checkout-pro-preferences/search-payments/get)
+- [Reembolso e idempotencia](https://www.mercadopago.com.co/developers/en/reference/online-payments/checkout-pro/create-refund/post)
+- [Notificaciones y recurso autoritativo](https://www.mercadopago.com.co/developers/es/docs/checkout-pro-orders/resources/notifications/webhooks)
+- [Manifest HMAC](https://www.mercadopago.com.co/developers/es/docs/checkout-api-orders/optional-notifications)

@@ -118,12 +118,20 @@ namespace VortexBird.Infrastructure.Persistence.Migrations
                     b.Property<Guid>("PartnerId")
                         .HasColumnType("uuid");
 
+                    b.Property<int>("RequestsPerMinute")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(120);
+
                     b.HasKey("Id");
 
                     b.HasIndex("PartnerId", "Code")
                         .IsUnique();
 
-                    b.ToTable("Channels");
+                    b.ToTable("Channels", t =>
+                        {
+                            t.HasCheckConstraint("ck_channel_quota", "\"RequestsPerMinute\" >= 10 AND \"RequestsPerMinute\" <= 100000");
+                        });
                 });
 
             modelBuilder.Entity("VortexBird.Domain.Entities.Customer", b =>
@@ -614,12 +622,183 @@ namespace VortexBird.Infrastructure.Persistence.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("OrderId");
+                    b.HasIndex("OrderId")
+                        .IsUnique();
 
                     b.HasIndex("Reference")
                         .IsUnique();
 
                     b.ToTable("Payments");
+                });
+
+            modelBuilder.Entity("VortexBird.Domain.Entities.PaymentCheckout", b =>
+                {
+                    b.Property<Guid>("OrderId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("AcceptedPaymentId")
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<int>("Attempts")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("ChannelId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CheckoutUrl")
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<decimal>("ExpectedAmount")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("numeric(18,2)");
+
+                    b.Property<DateTimeOffset>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ExternalReference")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<Guid?>("LeaseId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("LeaseUntil")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset>("NextAttemptAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("PartnerId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("PreferenceId")
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<bool>("ReconcileRequested")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("OrderId");
+
+                    b.HasIndex("ExternalReference")
+                        .IsUnique();
+
+                    b.HasIndex("PreferenceId")
+                        .IsUnique();
+
+                    b.HasIndex("NextAttemptAt", "LeaseUntil");
+
+                    b.HasIndex("OrderId", "PartnerId", "ChannelId");
+
+                    b.ToTable("PaymentCheckouts", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_checkout_amount", "\"ExpectedAmount\" > 0 AND \"Currency\" = 'COP'");
+                        });
+                });
+
+            modelBuilder.Entity("VortexBird.Domain.Entities.PaymentInbox", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Attempts")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<Guid?>("LeaseId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("LeaseUntil")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset>("NextAttemptAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("NotificationKey")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<DateTimeOffset?>("ProcessedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ProviderPaymentId")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("NotificationKey")
+                        .IsUnique();
+
+                    b.HasIndex("Status", "NextAttemptAt");
+
+                    b.ToTable("PaymentInbox", (string)null);
+                });
+
+            modelBuilder.Entity("VortexBird.Domain.Entities.PaymentReceipt", b =>
+                {
+                    b.Property<string>("ProviderPaymentId")
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<string>("Disposition")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<Guid>("OrderId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ProviderStatus")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("ProviderPaymentId");
+
+                    b.HasIndex("OrderId", "Disposition");
+
+                    b.ToTable("PaymentReceipts", (string)null);
                 });
 
             modelBuilder.Entity("VortexBird.Domain.Entities.Permission", b =>
@@ -735,6 +914,29 @@ namespace VortexBird.Infrastructure.Persistence.Migrations
                         .IsUnique();
 
                     b.ToTable("Products");
+                });
+
+            modelBuilder.Entity("VortexBird.Domain.Entities.QuotaCounter", b =>
+                {
+                    b.Property<Guid>("PartnerId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("BudgetKey")
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<int>("Count")
+                        .HasColumnType("integer");
+
+                    b.Property<long>("Minute")
+                        .HasColumnType("bigint");
+
+                    b.HasKey("PartnerId", "BudgetKey");
+
+                    b.ToTable("QuotaCounters", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_quota_count", "\"Count\" >= 0");
+                        });
                 });
 
             modelBuilder.Entity("VortexBird.Domain.Entities.Role", b =>
@@ -951,6 +1153,52 @@ namespace VortexBird.Infrastructure.Persistence.Migrations
                     b.ToTable("WebhookSubscriptions");
                 });
 
+            modelBuilder.Entity("VortexBird.Infrastructure.Messaging.MessagingInbox", b =>
+                {
+                    b.Property<Guid>("EventId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Consumer")
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<int>("Attempts")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset?>("CompletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("LeaseId")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<DateTimeOffset>("LeaseUntil")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("PartnerId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("PayloadHash")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.Property<DateTimeOffset>("ReceivedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("character varying(2048)");
+
+                    b.HasKey("EventId", "Consumer");
+
+                    b.HasIndex("Status", "LeaseUntil");
+
+                    b.ToTable("MessagingInbox", (string)null);
+                });
+
             modelBuilder.Entity("VortexBird.Domain.Entities.Channel", b =>
                 {
                     b.HasOne("VortexBird.Domain.Entities.Partner", null)
@@ -1030,6 +1278,25 @@ namespace VortexBird.Infrastructure.Persistence.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("VortexBird.Domain.Entities.PaymentCheckout", b =>
+                {
+                    b.HasOne("VortexBird.Domain.Entities.Order", null)
+                        .WithMany()
+                        .HasForeignKey("OrderId", "PartnerId", "ChannelId")
+                        .HasPrincipalKey("Id", "PartnerId", "ChannelId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("VortexBird.Domain.Entities.PaymentReceipt", b =>
+                {
+                    b.HasOne("VortexBird.Domain.Entities.PaymentCheckout", null)
+                        .WithMany()
+                        .HasForeignKey("OrderId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("VortexBird.Domain.Entities.Price", b =>
                 {
                     b.HasOne("VortexBird.Domain.Entities.Channel", null)
@@ -1037,6 +1304,15 @@ namespace VortexBird.Infrastructure.Persistence.Migrations
                         .HasForeignKey("ChannelId", "PartnerId")
                         .HasPrincipalKey("Id", "PartnerId")
                         .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("VortexBird.Domain.Entities.QuotaCounter", b =>
+                {
+                    b.HasOne("VortexBird.Domain.Entities.Partner", null)
+                        .WithMany()
+                        .HasForeignKey("PartnerId")
+                        .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
 

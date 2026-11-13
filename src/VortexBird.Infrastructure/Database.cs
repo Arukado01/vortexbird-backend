@@ -33,6 +33,13 @@ public sealed class IntegrationDbContext(DbContextOptions<IntegrationDbContext> 
 
     protected override void OnModelCreating(ModelBuilder b)
     {
+        b.Entity<QuotaCounter>().HasKey(x => new { x.PartnerId, x.BudgetKey });
+        b.Entity<QuotaCounter>().HasOne<Partner>().WithMany().HasForeignKey(x => x.PartnerId).OnDelete(DeleteBehavior.Cascade);
+        b.Entity<QuotaCounter>().ToTable("QuotaCounters", t => t.HasCheckConstraint("ck_quota_count", "\"Count\" >= 0"));
+        b.Entity<Channel>().Property(x => x.RequestsPerMinute).HasDefaultValue(120);
+        b.Entity<Channel>().ToTable(t => t.HasCheckConstraint("ck_channel_quota", "\"RequestsPerMinute\" >= 10 AND \"RequestsPerMinute\" <= 100000"));
+        VortexBird.Infrastructure.Payments.PaymentModelConfiguration.ConfigurePayments(b);
+        VortexBird.Infrastructure.Messaging.MessagingModelConfiguration.ConfigureMessaging(b);
         b.Entity<Partner>().HasIndex(x => x.Code).IsUnique();
         b.Entity<Customer>().HasIndex(x => new { x.PartnerId, x.ExternalId }).IsUnique();
         b.Entity<Customer>().HasOne<Partner>().WithMany().HasForeignKey(x => x.PartnerId).OnDelete(DeleteBehavior.Restrict);

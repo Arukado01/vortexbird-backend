@@ -45,76 +45,32 @@ public static class WebhookSafety
 
 public sealed class OutboxWorker(IServiceScopeFactory factory, ILogger<OutboxWorker> logger) : BackgroundService
 {
-    private readonly string workerId = Guid.NewGuid().ToString("N");
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        var nextReservationSweep = DateTimeOffset.MinValue;
         while (!stoppingToken.IsCancellationRequested)
         {
+            var worked = false;
             try
             {
-                await ProcessBatch(stoppingToken);
-                await ExpireReservations(stoppingToken);
+                worked = await ProcessBatch(stoppingToken);
+                if (DateTimeOffset.UtcNow >= nextReservationSweep)
+                {
+                    nextReservationSweep = DateTimeOffset.UtcNow.AddSeconds(5);
+                    await ExpireReservations(stoppingToken);
+                }
             }
             catch (Exception ex) when (!stoppingToken.IsCancellationRequested) { logger.LogWarning(ex, "Outbox iteration unavailable; durable messages retained"); }
-            await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
+            await Task.Delay(worked ? TimeSpan.FromMilliseconds(10) : TimeSpan.FromSeconds(2), stoppingToken);
         }
     }
-    private async Task ProcessBatch(CancellationToken ct)
+    private async Task<bool> ProcessBatch(CancellationToken ct)
     {
         using var scope = factory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<IntegrationDbContext>();
-        var now = DateTimeOffset.UtcNow;
-        // Lock only claim transaction; release before external delivery. Lease recovers a crashed worker.
-        List<OutboxMessage> messages;
-        await using (var tx = await db.Database.BeginTransactionAsync(ct))
-        {
-            messages = await db.OutboxMessages.FromSqlInterpolated($"SELECT * FROM \"OutboxMessages\" WHERE (\"Status\"='pending' OR (\"Status\"='processing' AND \"NextAttemptAt\" < {now})) AND \"NextAttemptAt\" <= {now} ORDER BY \"CreatedAt\" LIMIT 10 FOR UPDATE SKIP LOCKED").ToListAsync(ct);
-            foreach (var m in messages) { m.Status = "processing"; m.LeaseId = Guid.NewGuid().ToString("N"); m.NextAttemptAt = now.AddMinutes(2); }
-            await db.SaveChangesAsync(ct);
-            await tx.CommitAsync(ct);
-        }
-        foreach (var message in messages)
-        {
-            try
-            {
-                using var work = factory.CreateScope();
-                var workDb = work.ServiceProvider.GetRequiredService<IntegrationDbContext>();
-                if (!await workDb.ProcessedMessages.AnyAsync(x => x.Id == message.Id && x.Consumer == "integration-router-v1", ct))
-                {
-                    if (message.Type == "order.created")
-                    {
-                        using var payload = JsonDocument.Parse(message.Payload);
-                        await work.ServiceProvider.GetRequiredService<OrderSaga>().Advance(payload.RootElement.GetProperty("orderId").GetGuid(), payload.RootElement.GetProperty("paymentOutcome").GetString()!.ToLowerInvariant(), ct);
-                    }
-                    if (message.Type is "order.confirmed" or "shipment.started" or "delivery.confirmed")
-                    {
-                        using var payload = JsonDocument.Parse(message.Payload);
-                        await work.ServiceProvider.GetRequiredService<IOrderManagementAdapter>().SynchronizeOrder(payload.RootElement.GetProperty("orderId").GetGuid(), ct);
-                    }
-                    await Deliver(workDb, message, ct);
-                    workDb.ProcessedMessages.Add(new ProcessedMessage { Id = message.Id, Consumer = "integration-router-v1" });
-                    await workDb.SaveChangesAsync(ct);
-                }
-                message.Status = "processed"; message.ProcessedAt = DateTimeOffset.UtcNow; message.LastError = null;
-            }
-            catch (Exception ex) when (!ct.IsCancellationRequested)
-            {
-                message.Attempts++;
-                message.Status = message.Attempts >= 5 ? "dead_letter" : "pending";
-                message.NextAttemptAt = DateTimeOffset.UtcNow.AddSeconds(Math.Pow(2, message.Attempts) + Random.Shared.NextDouble());
-                message.LastError = ex.GetType().Name + ": delivery failed; see correlated logs";
-                logger.LogWarning(ex, "Event {EventId} {CorrelationId} attempt {Attempt} worker {Worker}", message.Id, message.CorrelationId, message.Attempts, workerId);
-            }
-            var lease = message.LeaseId;
-            db.Entry(message).State = EntityState.Detached;
-            // Fencing prevents a stale worker from overwriting the state of a re-leased delivery.
-            await db.OutboxMessages.Where(x => x.Id == message.Id && x.LeaseId == lease && x.Status == "processing").ExecuteUpdateAsync(s => s
-                .SetProperty(x => x.Status, message.Status).SetProperty(x => x.Attempts, message.Attempts)
-                .SetProperty(x => x.NextAttemptAt, message.NextAttemptAt).SetProperty(x => x.ProcessedAt, message.ProcessedAt)
-                .SetProperty(x => x.LastError, message.LastError), ct);
-        }
+        return await scope.ServiceProvider.GetRequiredService<VortexBird.Infrastructure.Messaging.OutboxDispatcher>().DispatchBatch(ct);
     }
-    private static async Task Deliver(IntegrationDbContext db, OutboxMessage message, CancellationToken ct)
+    internal static async Task Deliver(IntegrationDbContext db, OutboxMessage message, CancellationToken ct)
     {
         foreach (var subscription in await db.WebhookSubscriptions.Where(x => x.PartnerId == message.PartnerId && x.EventType == message.Type && x.Enabled).ToListAsync(ct))
         {

@@ -5,15 +5,21 @@ using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Xml.Linq;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.DataProtection.KeyManagement;
+using Microsoft.AspNetCore.DataProtection.Repositories;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.IdentityModel.Protocols;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using Microsoft.IdentityModel.Tokens;
+using VortexBird.Infrastructure.Payments;
 
 namespace VortexBird.QA.ApiBoundary;
 
@@ -46,11 +52,16 @@ public static class EntryPoint
             }));
             // Only discovery transport is replaced: the API's JWT validation flags,
             // audience, issuer, middleware and routes remain the production code.
-            builder.ConfigureTestServices(services => services.PostConfigure<JwtBearerOptions>("oidc", options =>
+            builder.ConfigureTestServices(services =>
             {
-                options.Configuration = discovery;
-                options.ConfigurationManager = new StaticConfigurationManager<OpenIdConnectConfiguration>(discovery);
-            }));
+                services.AddDataProtection().UseEphemeralDataProtectionProvider();
+                services.Configure<KeyManagementOptions>(options => options.XmlRepository = new InMemoryKeyRepository());
+                services.PostConfigure<JwtBearerOptions>("oidc", options =>
+                {
+                    options.Configuration = discovery;
+                    options.ConfigurationManager = new StaticConfigurationManager<OpenIdConnectConfiguration>(discovery);
+                });
+            });
         });
         using var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
         var results = new List<object>();
@@ -109,10 +120,66 @@ public static class EntryPoint
             using var config = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
             return response.IsSuccessStatusCode && config.RootElement.GetProperty("demoEnabled").GetBoolean() == false;
         });
+        const string callbackPath = "/api/v1/payments/mercadopago/webhook";
+        await Check("Disabled payment callback has no public acceptance path", async () =>
+            (await client.PostAsync(callbackPath, new StringContent("{}", Encoding.UTF8, "application/json"))).StatusCode == HttpStatusCode.NotFound);
+
+        const string callbackSecret = "qa-webhook-secret-at-least-32-characters-not-a-credential";
+        await using var callbackFactory = factory.WithWebHostBuilder(builder => builder.ConfigureTestServices(services =>
+        {
+            // Only test-account configuration changes. Execute the actual mapped callback,
+            // signature verifier/body limiter; every case must reject before persistence.
+            services.RemoveAll<PaymentRuntimeOptions>();
+            services.RemoveAll<MercadoPagoSandboxOptions>();
+            services.AddSingleton(new PaymentRuntimeOptions(true, callbackSecret));
+            services.AddSingleton(new MercadoPagoSandboxOptions(true, "qa-not-a-real-token", 123,
+                new Uri("https://callback.qa.invalid/notification"), new Uri("https://callback.qa.invalid/return")));
+        }));
+        using var callbackClient = callbackFactory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        string SignCallback()
+        {
+            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            var digest = HMACSHA256.HashData(Encoding.UTF8.GetBytes(callbackSecret), Encoding.UTF8.GetBytes($"id:456;request-id:qa-callback-1;ts:{timestamp};"));
+            return $"ts={timestamp},v1={Convert.ToHexString(digest).ToLowerInvariant()}";
+        }
+        async Task<bool> CallbackReject(string body, HttpStatusCode expected, string? signature, string query = "?data.id=456", bool streamed = false)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, callbackPath + query);
+            request.Headers.Add("x-request-id", "qa-callback-1");
+            if (signature is not null) request.Headers.Add("x-signature", signature);
+            request.Content = streamed ? new UnknownLengthContent(body) : new StringContent(body, Encoding.UTF8, "application/json");
+            using var response = await callbackClient.SendAsync(request);
+            return response.StatusCode == expected;
+        }
+        const string notification = "{\"type\":\"payment\",\"live_mode\":false,\"user_id\":123,\"data\":{\"id\":\"456\"}}";
+        await Check("Enabled callback rejects missing signature before database access", () => CallbackReject(notification, HttpStatusCode.Unauthorized, null));
+        await Check("Enabled callback rejects forged signature before database access", () => CallbackReject(notification, HttpStatusCode.Unauthorized, "ts=123,v1=forged"));
+        await Check("Signed callback cannot use ambiguous duplicate payment query IDs", () => CallbackReject(notification, HttpStatusCode.Unauthorized, SignCallback(), "?data.id=456&data.id=456"));
+        await Check("Signed callback rejects malformed JSON", () => CallbackReject("{", HttpStatusCode.BadRequest, SignCallback()));
+        await Check("Signed callback rejects body/query payment mismatch", () => CallbackReject(notification.Replace("\"456\"", "\"457\""), HttpStatusCode.BadRequest, SignCallback()));
+        await Check("Signed callback rejects live payment notifications", () => CallbackReject(notification.Replace("false", "true"), HttpStatusCode.BadRequest, SignCallback()));
+        await Check("Signed callback rejects a different seller", () => CallbackReject(notification.Replace("123", "321"), HttpStatusCode.BadRequest, SignCallback()));
+        await Check("Signed callback bounds declared request size", () => CallbackReject(new string(' ', 32769), HttpStatusCode.RequestEntityTooLarge, SignCallback()));
+        await Check("Signed callback bounds unknown-length streamed body", () => CallbackReject(new string(' ', 40000), HttpStatusCode.RequestEntityTooLarge, SignCallback(), streamed: true));
         var path = Environment.GetEnvironmentVariable("QA_API_RESULTS_PATH") ?? Path.Combine(root, "test-results/api-boundary-results.json");
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
-        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(new { measuredAt = DateTimeOffset.UtcNow, transport = "ASP.NET TestServer (in memory)", oidcDiscovery = "static ephemeral RSA fixture; real JWT validation middleware", databaseRequired = false, passed = results.Count - failures, failed = failures, results }, new JsonSerializerOptions { WriteIndented = true }));
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(new { measuredAt = DateTimeOffset.UtcNow, transport = "ASP.NET TestServer (in memory)", oidcDiscovery = "static ephemeral RSA fixture; real JWT validation middleware", paymentCallback = "real callback rejection paths; no accepted/durable receipt or provider call", databaseRequired = false, passed = results.Count - failures, failed = failures, results }, new JsonSerializerOptions { WriteIndented = true }));
         Console.WriteLine($"API boundary checks: {results.Count - failures}/{results.Count} passed.");
         return failures == 0 ? 0 : 1;
     }
+}
+
+internal sealed class UnknownLengthContent(string body) : HttpContent
+{
+    protected override bool TryComputeLength(out long length) { length = 0; return false; }
+    protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) => stream.WriteAsync(Encoding.UTF8.GetBytes(body)).AsTask();
+}
+
+// Test-host startup also initializes its key-ring hosted service. Keep that fixture
+// entirely in memory rather than writing unrelated host-machine profile keys.
+internal sealed class InMemoryKeyRepository : IXmlRepository
+{
+    private readonly List<XElement> entries = [];
+    public IReadOnlyCollection<XElement> GetAllElements() { lock (entries) return entries.Select(x => new XElement(x)).ToArray(); }
+    public void StoreElement(XElement element, string friendlyName) { lock (entries) entries.Add(new XElement(element)); }
 }
