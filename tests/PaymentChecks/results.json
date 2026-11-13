@@ -1,0 +1,102 @@
+{
+  "transport": "fake HttpMessageHandler, no network",
+  "liveSandboxVerified": false,
+  "checks": [
+    {
+      "name": "disabled sandbox makes no HTTP request",
+      "passed": true
+    },
+    {
+      "name": "missing token makes no HTTP request",
+      "passed": true
+    },
+    {
+      "name": "insecure callback rejected before request",
+      "passed": true
+    },
+    {
+      "name": "invalid amount rejected before request",
+      "passed": true
+    },
+    {
+      "name": "real seller cannot create preference",
+      "passed": true
+    },
+    {
+      "name": "wrong test seller cannot create preference",
+      "passed": true
+    },
+    {
+      "name": "verified test seller APP_USR can create hosted checkout",
+      "passed": true
+    },
+    {
+      "name": "checkout redirect outside provider rejected",
+      "passed": true
+    },
+    {
+      "name": "preference seller mismatch rejected",
+      "passed": true
+    },
+    {
+      "name": "read matching sandbox payment from authoritative API",
+      "passed": true
+    },
+    {
+      "name": "live_mode payment rejected",
+      "passed": true
+    },
+    {
+      "name": "payment amount mismatch rejected",
+      "passed": true
+    },
+    {
+      "name": "cross-partner order reference rejected",
+      "passed": true
+    },
+    {
+      "name": "payment seller mismatch rejected",
+      "passed": true
+    },
+    {
+      "name": "unknown provider status rejected",
+      "passed": true
+    },
+    {
+      "name": "payment path injection rejected before HTTP",
+      "passed": true
+    },
+    {
+      "name": "signature accepts valid second timestamp",
+      "passed": true
+    },
+    {
+      "name": "signature accepts valid millisecond timestamp",
+      "passed": true
+    },
+    {
+      "name": "tampered signed payment ID rejected",
+      "passed": true
+    },
+    {
+      "name": "expired signed webhook rejected",
+      "passed": true
+    },
+    {
+      "name": "future signed webhook rejected",
+      "passed": true
+    },
+    {
+      "name": "duplicate signature timestamp rejected",
+      "passed": true
+    },
+    {
+      "name": "missing request ID rejected",
+      "passed": true
+    },
+    {
+      "name": "malformed hexadecimal signature rejected",
+      "passed": true
+    }
+  ]
+}

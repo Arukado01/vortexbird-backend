@@ -1,0 +1,36 @@
+name: Deploy reviewed backend
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-2
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+      - name: Publish immutable image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          REPOSITORY: ${{ vars.ECR_BACKEND_REPOSITORY }}
+        run: |
+          test -n "$REPOSITORY"
+          docker build -t "$REGISTRY/$REPOSITORY:$GITHUB_SHA" .
+          docker push "$REGISTRY/$REPOSITORY:$GITHUB_SHA"
+      - name: Deploy with rollback
+        env:
+          CLUSTER: ${{ vars.EKS_CLUSTER_NAME }}
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          REPOSITORY: ${{ vars.ECR_BACKEND_REPOSITORY }}
+        run: |
+          test -n "$CLUSTER"
+          aws eks update-kubeconfig --name "$CLUSTER"
+          kubectl -n vortexbird set image deployment/backend backend="$REGISTRY/$REPOSITORY:$GITHUB_SHA"
+          kubectl -n vortexbird rollout status deployment/backend --timeout=180s || { kubectl -n vortexbird rollout undo deployment/backend; exit 1; }

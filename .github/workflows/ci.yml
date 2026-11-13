@@ -1,0 +1,47 @@
+name: Backend quality
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: vortexbird_ci
+          POSTGRES_USER: vortexbird
+          POSTGRES_PASSWORD: ci-isolated-database
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U vortexbird -d vortexbird_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet restore VortexBird.sln
+      - run: dotnet build VortexBird.sln --no-restore -c Release
+      - run: dotnet run --project tests/VortexBird.DomainChecks -c Release --no-build
+      - run: dotnet run --project tests/VortexBird.Tests -c Release --no-build
+      - name: Scope and webhook security regression checks
+        run: dotnet run --project tests/SecurityChecks -c Release --no-build
+      - name: Production API authentication boundary checks
+        run: dotnet run --project tests/ApiBoundaryChecks -c Release --no-build
+      - name: Sandbox payment contract checks
+        run: dotnet run --project tests/PaymentChecks -c Release --no-build
+      - name: Preserve security test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-security-results
+          path: test-results/*.json
+          if-no-files-found: warn
+      - run: dotnet list VortexBird.sln package --vulnerable --include-transitive
+      - name: PostgreSQL API integration
+        shell: pwsh
+        env:
+          ConnectionStrings__Database: Host=localhost;Database=vortexbird_ci;Username=vortexbird;Password=ci-isolated-database
+        run: ./tests/Integration.ps1 -Configuration Release
+      - run: docker build -t vortexbird-api:ci .
