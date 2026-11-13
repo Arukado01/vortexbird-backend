@@ -114,6 +114,15 @@ public static class EntryPoint
         await Check("Production liveness is public", async () => (await client.GetAsync("/health/live")).StatusCode == HttpStatusCode.OK);
         await Check("Production has no demo-login endpoint", async () => (await client.PostAsync("/api/v1/auth/demo-login", new StringContent("{}", Encoding.UTF8, "application/json"))).StatusCode == HttpStatusCode.NotFound);
         await Check("Production OpenAPI endpoint is not exposed", async () => (await client.GetAsync("/openapi/v1.json")).StatusCode == HttpStatusCode.NotFound);
+        await Check("Development serves its generated OpenAPI document", async () =>
+        {
+            await using var developmentFactory = factory.WithWebHostBuilder(builder => builder.UseEnvironment("Development"));
+            using var developmentClient = developmentFactory.CreateClient();
+            using var response = await developmentClient.GetAsync("/openapi/v1.json");
+            if (response.StatusCode != HttpStatusCode.OK) return false;
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            return document.RootElement.GetProperty("paths").TryGetProperty("/api/v1/orders", out _);
+        });
         await Check("Public auth config advertises demo disabled", async () =>
         {
             using var response = await client.GetAsync("/api/v1/auth/config");
