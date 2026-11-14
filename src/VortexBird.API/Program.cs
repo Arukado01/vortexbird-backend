@@ -4,8 +4,10 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi;
 using VortexBird.API;
 using VortexBird.Application.Abstractions;
 using VortexBird.Infrastructure;
@@ -15,7 +17,33 @@ using VortexBird.Infrastructure.Messaging;
 var builder = WebApplication.CreateBuilder(args);
 builder.Logging.ClearProviders();
 builder.Logging.AddJsonConsole(o => o.IncludeScopes = true);
-builder.Services.AddOpenApi();
+builder.Services.AddOpenApi(options =>
+{
+    options.AddDocumentTransformer((document, _, _) =>
+    {
+        document.Components ??= new OpenApiComponents();
+        document.Components.SecuritySchemes ??= new Dictionary<string, IOpenApiSecurityScheme>();
+        document.Components.SecuritySchemes["Bearer"] = new OpenApiSecurityScheme
+        {
+            Type = SecuritySchemeType.Http,
+            Scheme = "bearer",
+            BearerFormat = "JWT"
+        };
+        return Task.CompletedTask;
+    });
+    options.AddOperationTransformer((operation, context, _) =>
+    {
+        var metadata = context.Description.ActionDescriptor.EndpointMetadata;
+        if (metadata.OfType<IAuthorizeData>().Any() && !metadata.OfType<IAllowAnonymous>().Any())
+        {
+            operation.Security = [new OpenApiSecurityRequirement
+            {
+                [new OpenApiSecuritySchemeReference("Bearer", context.Document)] = []
+            }];
+        }
+        return Task.CompletedTask;
+    });
+});
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddDbContext<IntegrationDbContext>(o => o.UseNpgsql(builder.Configuration.GetConnectionString("Database") ?? "Host=localhost;Port=5432;Database=vortexbird;Username=vortexbird;Timeout=3;Command Timeout=10"));
 builder.Services.AddScoped<HttpActor>();
@@ -105,7 +133,11 @@ app.Use(async (ctx, next) =>
     }
     await next(ctx);
 });
-if (app.Environment.IsDevelopment()) app.MapOpenApi();
+if (app.Environment.IsDevelopment())
+{
+    app.MapOpenApi();
+    app.UseSwaggerUI(options => options.SwaggerEndpoint("/openapi/v1.json", "VortexBird API v1"));
+}
 app.MapGet("/health/live", () => Results.Ok(new { status = "live", service = "VortexBird.API" }));
 app.MapGet("/health/ready", async (IntegrationDbContext db, CancellationToken ct) => await db.Database.CanConnectAsync(ct) ? Results.Ok(new { status = "ready" }) : Results.StatusCode(503));
 app.MapGet("/api/v1/auth/config", () => new { demoEnabled = demo, authority = builder.Configuration["Authentication:PublicAuthority"] ?? builder.Configuration["Authentication:ValidIssuer"] ?? builder.Configuration["Authentication:Authority"] ?? "http://localhost:8080/realms/vortexbird", clientId = "vortexbird-portal" });

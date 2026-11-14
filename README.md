@@ -9,12 +9,14 @@ La opción recomendada es `docker compose` desde el repositorio hermano `vortexb
 1. Define las variables de `.env.example` en el proceso. `.NET` no carga archivos `.env` automáticamente. Genera claves locales aleatorias; no uses los textos `REPLACE_*` como credenciales.
 2. Configura `Database__Initialize=true`, `Seed__Enabled=true` y `ASPNETCORE_ENVIRONMENT=Development` para aplicar migraciones y datos iniciales. En producción ejecuta el script de migración revisado como una tarea separada.
 3. Ejecuta `dotnet run --project src/VortexBird.API --no-launch-profile --urls http://localhost:5080`.
-4. OpenAPI: `http://localhost:5080/openapi/v1.json` (solo Development). Liveness `/health/live`; readiness `/health/ready` comprueba PostgreSQL.
+4. En Development, abre `/swagger` para consultar y ejecutar operaciones de la API. El documento JSON está en `/openapi/v1.json`. Con Compose, usa el puerto `API_PORT` de `vortexbird-infrastructure/.env`. `/health/ready` comprueba PostgreSQL.
 5. Usa el frontend o `scripts/Seed-Demo.ps1` para generar órdenes **a través de los casos de uso reales** y llenar los gráficos.
 
 El seed crea un partner, dos canales, 48 productos, 96 posiciones de inventario, 96 precios, 31 clientes CRM y nueve roles. Identificadores: partner `11111111-1111-1111-1111-111111111111`, canal web `22222222-2222-2222-2222-222222222222`, tienda `BOG-01`, SKU `AND-0001`, cliente `CUST-001`. No se inventan transacciones para hacer que el dashboard parezca activo.
 
 ## Identidad
+
+Para probar rutas protegidas en Swagger con el modo demo, ejecuta `POST /api/v1/auth/demo-login` con `DEMO_EMAIL` y `DEMO_PASSWORD` de `.env`. Copia el campo `accessToken` de la respuesta, pégalo en **Authorize** sin el prefijo `Bearer` y prueba `GET /api/v1/orders`. El token dura diez minutos.
 
 Keycloak es el proveedor normal OIDC. El servicio valida firma, issuer, audience y expiración independientemente del gateway. `Authentication__Authority` puede usar DNS interno y `Authentication__ValidIssuer` debe coincidir con el issuer que ve el navegador. `Authentication__PublicAuthority` permite una dirección pública diferente para el portal. `Seed__AdminSubject` debe ser el `sub` del usuario Keycloak inicial. Alta, recuperación, cambio de contraseña, sesión y refresh rotation pertenecen a Keycloak; la tabla Users mantiene autorización/contexto de la aplicación, nunca contraseñas.
 

@@ -114,14 +114,25 @@ public static class EntryPoint
         await Check("Production liveness is public", async () => (await client.GetAsync("/health/live")).StatusCode == HttpStatusCode.OK);
         await Check("Production has no demo-login endpoint", async () => (await client.PostAsync("/api/v1/auth/demo-login", new StringContent("{}", Encoding.UTF8, "application/json"))).StatusCode == HttpStatusCode.NotFound);
         await Check("Production OpenAPI endpoint is not exposed", async () => (await client.GetAsync("/openapi/v1.json")).StatusCode == HttpStatusCode.NotFound);
-        await Check("Development serves its generated OpenAPI document", async () =>
+        await Check("Production Swagger UI is not exposed", async () => (await client.GetAsync("/swagger/index.html")).StatusCode == HttpStatusCode.NotFound);
+        await Check("Development Swagger UI loads its generated document with Bearer authorization", async () =>
         {
             await using var developmentFactory = factory.WithWebHostBuilder(builder => builder.UseEnvironment("Development"));
             using var developmentClient = developmentFactory.CreateClient();
+            using var page = await developmentClient.GetAsync("/swagger/index.html");
+            if (page.StatusCode != HttpStatusCode.OK || page.Content.Headers.ContentType?.MediaType != "text/html") return false;
+            using var script = await developmentClient.GetAsync("/swagger/index.js");
+            if (script.StatusCode != HttpStatusCode.OK || !(await script.Content.ReadAsStringAsync()).Contains("/openapi/v1.json", StringComparison.Ordinal)) return false;
             using var response = await developmentClient.GetAsync("/openapi/v1.json");
             if (response.StatusCode != HttpStatusCode.OK) return false;
             using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-            return document.RootElement.GetProperty("paths").TryGetProperty("/api/v1/orders", out _);
+            var rootElement = document.RootElement;
+            var scheme = rootElement.GetProperty("components").GetProperty("securitySchemes").GetProperty("Bearer");
+            var paths = rootElement.GetProperty("paths");
+            var orderSecurity = paths.GetProperty("/api/v1/orders").GetProperty("get").GetProperty("security");
+            return scheme.GetProperty("scheme").GetString() == "bearer"
+                && orderSecurity[0].TryGetProperty("Bearer", out _)
+                && !paths.GetProperty("/health/live").GetProperty("get").TryGetProperty("security", out _);
         });
         await Check("Public auth config advertises demo disabled", async () =>
         {
