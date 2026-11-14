@@ -73,7 +73,9 @@ public static class DashboardEndpoints
         var channelRestricted = channelId.HasValue || claimedChannels.Length > 0;
         int? pendingEvents = channelRestricted ? null : await events.CountAsync(x => x.Status == "pending" || x.Status == "processing", ct);
         int? failedWebhooks = channelRestricted ? null : await deliveries.CountAsync(x => x.Status == "failed", ct);
-        var daily = await orders.GroupBy(x => x.CreatedAt.UtcDateTime.Date).Select(g => new { Date = g.Key, Count = g.Count(), Total = g.Sum(x => x.Total) }).OrderBy(x => x.Date).ToListAsync(ct);
+        var daily = await orders.GroupBy(x => DateOnly.FromDateTime(x.CreatedAt.UtcDateTime))
+            .Select(g => new { Date = g.Key, Count = g.Count(), Total = g.Sum(x => x.Total) })
+            .OrderBy(x => x.Date).ToListAsync(ct);
         var ordersByStatus = await orders.GroupBy(x => x.Status).Select(g => new { status = g.Key, count = g.Count() }).OrderBy(x => x.status).ToListAsync(ct);
         var channelVolumes = await orders.GroupBy(x => x.ChannelId).Select(g => new { ChannelId = g.Key, Count = g.Count() }).ToListAsync(ct);
         var channelIds = channelVolumes.Select(x => x.ChannelId).ToArray();

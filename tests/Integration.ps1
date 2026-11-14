@@ -32,5 +32,10 @@ try {
   $order=$null
   for($i=0;$i -lt 30;$i++) { $order=Invoke-RestMethod "$base/api/v1/orders/$($first.id)" -Headers $headers; if($order.status -eq 'cancelled'){break}; Start-Sleep -Milliseconds 500 }
   if ($order.status -ne 'cancelled' -or $order.paymentStatus -ne 'rejected') { throw 'Rejected payment did not compensate order.' }
+  $dashboard=Invoke-RestMethod "$base/api/v1/dashboard?days=30" -Headers $headers
+  $dailyCount=($dashboard.ordersByDay | Measure-Object -Property count -Sum).Sum
+  if ($dashboard.metrics.totalOrders -lt 1 -or $dailyCount -ne $dashboard.metrics.totalOrders) {
+    throw 'The dashboard did not aggregate its orders into UTC days.'
+  }
   Write-Output 'PASS PostgreSQL API idempotency, payload conflict, persisted saga and compensation.'
 } finally { if (-not $server.HasExited) { Stop-Process -Id $server.Id } }
