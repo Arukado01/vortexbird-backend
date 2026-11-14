@@ -36,14 +36,14 @@ public sealed partial class OrderSaga
         switch (action)
         {
             case PaymentAction.Confirm:
-                if (order.Status == OrderStates.Reserved) order.TransitionTo(OrderStates.AwaitingPayment, "Confirmación de checkout sandbox recibida.", now);
+                if (order.Status == OrderStates.Reserved) db.RecordOrderTransition(order, OrderStates.AwaitingPayment, "Confirmación de checkout sandbox recibida.", now);
                 await ApplyOutcome(order, payment, "approved", ct);
                 checkout.AcceptedPaymentId = evidence.PaymentId;
                 checkout.State = "approved";
                 receipt.Disposition = "accepted";
                 break;
             case PaymentAction.Cancel:
-                if (order.Status == OrderStates.Reserved) order.TransitionTo(OrderStates.AwaitingPayment, "Resultado de checkout sandbox recibido.", now);
+                if (order.Status == OrderStates.Reserved) db.RecordOrderTransition(order, OrderStates.AwaitingPayment, "Resultado de checkout sandbox recibido.", now);
                 await ApplyOutcome(order, payment, "rejected", ct);
                 checkout.State = "cancelled";
                 receipt.Disposition = "rejected";
@@ -52,8 +52,8 @@ public sealed partial class OrderSaga
                 if (order.Status is OrderStates.Reserved or OrderStates.AwaitingPayment)
                 {
                     foreach (var reservation in reservations) await inventory.Release(reservation.Id.ToString(), ct);
-                    order.TransitionTo(OrderStates.Compensating, "Pago tardío o reserva inválida; reembolso en conciliación.", now);
-                    order.TransitionTo(OrderStates.Cancelled, "Reservas liberadas; no se realizará fulfillment.", now);
+                    db.RecordOrderTransition(order, OrderStates.Compensating, "Pago tardío o reserva inválida; reembolso en conciliación.", now);
+                    db.RecordOrderTransition(order, OrderStates.Cancelled, "Reservas liberadas; no se realizará fulfillment.", now);
                 }
                 if (checkout.AcceptedPaymentId is null)
                 {
@@ -77,14 +77,14 @@ public sealed partial class OrderSaga
                             await db.Stocks.Where(x => x.Id == reservation.StockId).ExecuteUpdateAsync(s => s.SetProperty(x => x.OnHand, x => x.OnHand + reservation.Quantity).SetProperty(x => x.Version, x => x.Version + 1), ct);
                             reservation.Status = "restocked";
                         }
-                        order.TransitionTo(OrderStates.Compensating, "Reembolso verificado antes del despacho.", now);
-                        order.TransitionTo(OrderStates.Cancelled, "Inventario restituido.", now);
+                        db.RecordOrderTransition(order, OrderStates.Compensating, "Reembolso verificado antes del despacho.", now);
+                        db.RecordOrderTransition(order, OrderStates.Cancelled, "Inventario restituido.", now);
                     }
                     else if (order.Status is OrderStates.Reserved or OrderStates.AwaitingPayment)
                     {
                         foreach (var reservation in reservations) await inventory.Release(reservation.Id.ToString(), ct);
-                        order.TransitionTo(OrderStates.Compensating, "Reembolso externo verificado.", now);
-                        order.TransitionTo(OrderStates.Cancelled, "Reserva liberada.", now);
+                        db.RecordOrderTransition(order, OrderStates.Compensating, "Reembolso externo verificado.", now);
+                        db.RecordOrderTransition(order, OrderStates.Cancelled, "Reserva liberada.", now);
                     }
                     checkout.State = order.Status is OrderStates.Shipped or OrderStates.Delivered ? "manual_review" : "refunded";
                     payment.Status = order.PaymentStatus = "refunded";

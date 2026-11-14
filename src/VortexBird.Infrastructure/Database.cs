@@ -93,6 +93,13 @@ public sealed class IntegrationDbContext(DbContextOptions<IntegrationDbContext> 
                 property.SetMaxLength(property.Name is "Payload" or "ResponseJson" ? 65536 : 2048);
     }
 
+    public void RecordOrderTransition(Order order, string status, string description, DateTimeOffset at)
+    {
+        order.TransitionTo(status, description, at);
+        // The domain assigns a GUID before tracking. Explicitly insert new history rows.
+        OrderHistories.Add(order.Timeline[^1]);
+    }
+
     private void CheckAudit()
     {
         if (ChangeTracker.Entries<ActivityLog>().Any(x => x.State is EntityState.Modified or EntityState.Deleted))

@@ -119,7 +119,7 @@ public static class OperationalEndpoints
             if (input.Status is not (OrderStates.Shipped or OrderStates.Delivered)) throw new RequestInputException("Solo se admite shipped o delivered.");
             if (input.Status == OrderStates.Shipped && order.PaymentStatus != PaymentStates.Approved)
                 throw new DomainException("payment_not_approved", "El despacho requiere un pago aprobado y sin reversión pendiente.");
-            order.TransitionTo(input.Status, "Actualización de fulfillment simulado.", DateTimeOffset.UtcNow);
+            db.RecordOrderTransition(order, input.Status, "Actualización de fulfillment simulado.", DateTimeOffset.UtcNow);
             db.OutboxMessages.Add(new OutboxMessage { PartnerId = order.PartnerId, CorrelationId = actor.CorrelationId, Type = input.Status == OrderStates.Shipped ? "shipment.started" : "delivery.confirmed", Payload = JsonSerializer.Serialize(new { orderId = order.Id, status = order.Status }) });
             await db.SaveChangesAsync(ct);
             await transaction.CommitAsync(ct);

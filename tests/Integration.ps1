@@ -32,6 +32,10 @@ try {
   $order=$null
   for($i=0;$i -lt 30;$i++) { $order=Invoke-RestMethod "$base/api/v1/orders/$($first.id)" -Headers $headers; if($order.status -eq 'cancelled'){break}; Start-Sleep -Milliseconds 500 }
   if ($order.status -ne 'cancelled' -or $order.paymentStatus -ne 'rejected') { throw 'Rejected payment did not compensate order.' }
+  $history = @($order.timeline | Sort-Object createdAt | ForEach-Object status)
+  if (($history -join ',') -ne 'reserved,awaiting_payment,compensating,cancelled') {
+    throw 'The worker did not persist the expected order history.'
+  }
   $dashboard=Invoke-RestMethod "$base/api/v1/dashboard?days=30" -Headers $headers
   $dailyCount=($dashboard.ordersByDay | Measure-Object -Property count -Sum).Sum
   if ($dashboard.metrics.totalOrders -lt 1 -or $dailyCount -ne $dashboard.metrics.totalOrders) {

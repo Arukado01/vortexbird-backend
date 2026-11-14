@@ -68,7 +68,7 @@ public sealed class CreateOrderHandler(IntegrationDbContext db, ICurrentActor ac
             order.Items.Add(new OrderItem { OrderId = order.Id, Sku = line.Sku, Quantity = line.Quantity, UnitPrice = price.Amount });
             order.Total += price.Amount * line.Quantity;
         }
-        order.TransitionTo(OrderStates.Reserved, "Inventario reservado; procesamiento asíncrono de pago en cola.", DateTimeOffset.UtcNow);
+        db.RecordOrderTransition(order, OrderStates.Reserved, "Inventario reservado; procesamiento asíncrono de pago en cola.", DateTimeOffset.UtcNow);
         var receipt = new OrderReceipt(order.Id, order.Status, order.PaymentStatus, order.Total, order.Currency, order.CorrelationId);
         db.IdempotencyRecords.Add(new IdempotencyRecord { PartnerId = request.PartnerId, Key = command.Key, RequestHash = hash, State = "completed", OrderId = order.Id, ResponseJson = JsonSerializer.Serialize(receipt), ExpiresAt = DateTimeOffset.UtcNow.AddHours(24) });
         db.OutboxMessages.Add(new OutboxMessage { PartnerId = order.PartnerId, Type = "order.created", CorrelationId = order.CorrelationId, Payload = JsonSerializer.Serialize(new { orderId = order.Id, paymentOutcome = request.PaymentOutcome }) });
@@ -94,7 +94,7 @@ public sealed partial class OrderSaga(IntegrationDbContext db, IPaymentGateway g
         var order = await db.Orders.Include(x => x.Timeline).SingleAsync(x => x.Id == orderId, ct);
         if (order.Status != OrderStates.Reserved) return;
         outcome = result.Status;
-        order.TransitionTo(OrderStates.AwaitingPayment, result.Simulated ? "Intención de pago creada en simulador explícito." : "Checkout sandbox persistido; esperando confirmación verificada del proveedor.", DateTimeOffset.UtcNow);
+        db.RecordOrderTransition(order, OrderStates.AwaitingPayment, result.Simulated ? "Intención de pago creada en simulador explícito." : "Checkout sandbox persistido; esperando confirmación verificada del proveedor.", DateTimeOffset.UtcNow);
         var payment = await db.Payments.SingleOrDefaultAsync(x => x.OrderId == order.Id, ct);
         if (payment is null)
         {
@@ -135,8 +135,8 @@ public sealed partial class OrderSaga(IntegrationDbContext db, IPaymentGateway g
         }
         payment.Status = outcome;
         order.PaymentStatus = outcome;
-        if (outcome == "approved") order.TransitionTo(OrderStates.Confirmed, "Pago aprobado e inventario consumido.", DateTimeOffset.UtcNow);
-        else { order.TransitionTo(OrderStates.Compensating, "Pago rechazado; liberando reserva.", DateTimeOffset.UtcNow); order.TransitionTo(OrderStates.Cancelled, "Reserva liberada.", DateTimeOffset.UtcNow); }
+        if (outcome == "approved") db.RecordOrderTransition(order, OrderStates.Confirmed, "Pago aprobado e inventario consumido.", DateTimeOffset.UtcNow);
+        else { db.RecordOrderTransition(order, OrderStates.Compensating, "Pago rechazado; liberando reserva.", DateTimeOffset.UtcNow); db.RecordOrderTransition(order, OrderStates.Cancelled, "Reserva liberada.", DateTimeOffset.UtcNow); }
         db.OutboxMessages.Add(new OutboxMessage { PartnerId = order.PartnerId, Type = $"payment.{outcome}", CorrelationId = order.CorrelationId, Payload = JsonSerializer.Serialize(new { orderId = order.Id, reference = payment.Reference, payment.Status }) });
         if (outcome == "approved") db.OutboxMessages.Add(new OutboxMessage { PartnerId = order.PartnerId, Type = "order.confirmed", CorrelationId = order.CorrelationId, Payload = JsonSerializer.Serialize(new { orderId = order.Id, order.Status }) });
     }
@@ -153,8 +153,8 @@ public sealed partial class OrderSaga(IntegrationDbContext db, IPaymentGateway g
         {
             await inventory.Release(r.Id.ToString(), ct);
         }
-        order.TransitionTo(OrderStates.Compensating, "Compensación solicitada.", DateTimeOffset.UtcNow);
-        order.TransitionTo(OrderStates.Cancelled, "Reservas liberadas.", DateTimeOffset.UtcNow);
+        db.RecordOrderTransition(order, OrderStates.Compensating, "Compensación solicitada.", DateTimeOffset.UtcNow);
+        db.RecordOrderTransition(order, OrderStates.Cancelled, "Reservas liberadas.", DateTimeOffset.UtcNow);
         var payment = await db.Payments.SingleOrDefaultAsync(x => x.OrderId == order.Id, ct);
         if (payment is not null) payment.Status = "cancelled";
         var checkout = await db.Set<PaymentCheckout>().SingleOrDefaultAsync(x => x.OrderId == order.Id, ct);
