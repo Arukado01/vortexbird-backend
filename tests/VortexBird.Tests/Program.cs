@@ -14,6 +14,8 @@ var reordered = one with { Items = [new("A", 2), new("B", 1)] };
 Check(RequestFingerprint.For(one) == RequestFingerprint.For(reordered), "Idempotency hash independent of line ordering");
 Check(RequestFingerprint.For(one) != RequestFingerprint.For(one with { CustomerId = "C2" }), "Idempotency hash detects changed customer");
 Check(RequestFingerprint.For(one) != RequestFingerprint.For(one with { PartnerId = Guid.NewGuid() }), "Idempotency hash binds tenant");
+Check(RequestFingerprint.For(one) == RequestFingerprint.For(one, "approved"), "Default simulation preserves legacy idempotency hash");
+Check(RequestFingerprint.For(one) != RequestFingerprint.For(one, "rejected"), "Changing a simulated outcome changes the fingerprint");
 Check(!WebhookSafety.IsPublic(IPAddress.Parse("127.0.0.1")), "Reject loopback webhook");
 Check(!WebhookSafety.IsPublic(IPAddress.Parse("169.254.169.254")), "Reject metadata webhook");
 Check(!WebhookSafety.IsPublic(IPAddress.Parse("::ffff:10.0.0.1")), "Reject IPv4 mapped private webhook");
@@ -35,4 +37,6 @@ await CheckAsync();
 async Task CheckAsync() { try { await db.SaveChangesAsync(); } catch (InvalidOperationException ex) when (ex.Message.Contains("append-only")) { checks++; Console.WriteLine("PASS Async audit mutation prohibited"); return; } throw new Exception("Audit mutation allowed"); }
 Check(typeof(Order).Assembly.GetReferencedAssemblies().All(x => !x.Name!.Contains("Infrastructure") && !x.Name.Contains("EntityFramework")), "Domain has no infrastructure dependency");
 Check(typeof(ICurrentActor).Assembly.GetReferencedAssemblies().All(x => !x.Name!.Contains("Infrastructure") && !x.Name.Contains("EntityFramework")), "Application has no infrastructure dependency");
+DeploymentChecks.Run(db, Check, Reject);
+PilotRoleChecks.Run(Check, Reject);
 Console.WriteLine($"{checks}/{checks} invariant and architecture checks passed. PostgreSQL integration tests require a running database.");

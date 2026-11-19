@@ -2,6 +2,7 @@ using System.Net.Mail;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using Microsoft.EntityFrameworkCore;
+using VortexBird.Application.Abstractions;
 using VortexBird.Application.Contracts;
 using VortexBird.Domain.Entities;
 using VortexBird.Infrastructure;
@@ -257,10 +258,10 @@ public static class AdministrationEndpoints
             var entity = await db.WebhookSubscriptions.FindAsync([id], ct) ?? throw new MissingEntityException("Suscripción no encontrada.");
             await actor.EnsurePartnerAccess(entity.PartnerId, cancellationToken: ct); entity.Enabled = false; await db.SaveChangesAsync(ct); return Results.NoContent();
         });
-        api.MapGet("/settings", async (IHostEnvironment environment, HttpActor actor, CancellationToken ct) =>
+        api.MapGet("/settings", async (IHostEnvironment environment, IPaymentGateway payments, HttpActor actor, CancellationToken ct) =>
         {
             await actor.Require("settings.read", ct); actor.RequireGlobal();
-            return Results.Ok(new { platform = "VortexBird Integration Platform", environment = environment.EnvironmentName, externalSystems = "simulated", paymentProvider = "simulator", currency = "COP", apiVersion = "v1", maximumPageSize = 100, idempotencyRetentionHours = 24, configurationMode = "environment", mutableThroughPortal = false });
+            return Results.Ok(new { platform = "VortexBird Integration Platform", environment = environment.EnvironmentName, externalSystems = "simulated", paymentProvider = payments.Provider, currency = "COP", apiVersion = "v1", maximumPageSize = 100, idempotencyRetentionHours = 24, configurationMode = "environment", mutableThroughPortal = false });
         });
         return api;
     }
@@ -324,7 +325,7 @@ internal static class AdminPage
     public static async Task<PagedResult<T>> Read<T>(IQueryable<T> query, HttpRequest request, CancellationToken ct)
     {
         var page = Integer(request, "page", 1, 1, 1000000);
-        var size = Integer(request, "pageSize", 20, 1, 100);
+        var size = Integer(request, "pageSize", 10, 1, 100);
         var count = await query.CountAsync(ct);
         return new PagedResult<T>(await query.Skip((page - 1) * size).Take(size).ToListAsync(ct), page, size, count);
     }

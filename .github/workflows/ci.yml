@@ -18,6 +18,24 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify documentation impact for API and payment changes
+        if: github.event_name == 'pull_request'
+        env:
+          DOCS_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          changed=$(git diff --name-only "$DOCS_BASE...HEAD")
+          if ! grep -qE '^src/(VortexBird[.]API/|VortexBird[.]Application/Contracts/|VortexBird[.]Infrastructure/Payments/)' <<< "$changed"; then
+            exit 0
+          fi
+          if grep -qE '^(README[^/]*[.]md|docs/.*[.]md)$' <<< "$changed" ||
+             grep -qiE '^Documentación:[[:space:]]+(https://|Sin impacto: [^[:space:]].{12,})' <<< "$PR_BODY"; then
+            exit 0
+          fi
+          echo 'Actualiza la documentación técnica o registra Documentación: con el enlace al cambio o el motivo sin impacto.'
+          exit 1
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
@@ -37,7 +55,7 @@ jobs:
         run: dotnet run --project tests/CacheChecks -c Release --no-build -- --report=test-results/cache-results.json
       - name: Durable messaging contract checks
         run: dotnet run --project tests/MessagingChecks -c Release --no-build -- --report=test-results/messaging-results.json
-      - name: Official AWS signing and SQS transport checks
+      - name: Official AWSSDK.SQS transport checks
         run: dotnet run --project tests/SqsTransportChecks -c Release --no-build -- --report=test-results/sqs-transport-results.json
       - name: Preserve security test evidence
         if: always()

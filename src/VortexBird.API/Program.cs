@@ -13,8 +13,40 @@ using VortexBird.Application.Abstractions;
 using VortexBird.Infrastructure;
 using VortexBird.Infrastructure.Payments;
 using VortexBird.Infrastructure.Messaging;
+using VortexBird.Infrastructure.Deployment;
+
+var railwayPortSetting = Environment.GetEnvironmentVariable("PORT");
+int? railwayPort = null;
+if (!string.IsNullOrEmpty(railwayPortSetting))
+{
+    if (!int.TryParse(railwayPortSetting, out var port) || port is < 1 or > 65_535)
+        throw new InvalidOperationException("PORT must be a valid TCP port.");
+    railwayPort = port;
+}
+
+if (args is ["--readiness-probe"])
+{
+    using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+    try
+    {
+        using var result = await client.GetAsync($"http://127.0.0.1:{railwayPort ?? 8080}/health/ready");
+        Environment.ExitCode = result.IsSuccessStatusCode ? 0 : 1;
+    }
+    catch (Exception error) when (error is HttpRequestException or OperationCanceledException)
+    {
+        Environment.ExitCode = 1;
+    }
+    return;
+}
+
+if (args.Any(argument => argument is "--migrate" or "--bootstrap-admin" or "--bind-pilot-roles"))
+{
+    Environment.ExitCode = await DeploymentJob.Run(args);
+    return;
+}
 
 var builder = WebApplication.CreateBuilder(args);
+if (railwayPort is { } listenPort) builder.WebHost.UseUrls($"http://*:{listenPort}");
 builder.Logging.ClearProviders();
 builder.Logging.AddJsonConsole(o => o.IncludeScopes = true);
 builder.Services.AddOpenApi(options =>
@@ -45,7 +77,9 @@ builder.Services.AddOpenApi(options =>
     });
 });
 builder.Services.AddHttpContextAccessor();
-builder.Services.AddDbContext<IntegrationDbContext>(o => o.UseNpgsql(builder.Configuration.GetConnectionString("Database") ?? "Host=localhost;Port=5432;Database=vortexbird;Username=vortexbird;Timeout=3;Command Timeout=10"));
+var databaseConnection = DatabaseConnectionPolicy.Validate(DatabaseConnectionPolicy.ReadConfiguredConnection(builder.Configuration)
+    ?? "Host=localhost;Port=5432;Database=vortexbird;Username=vortexbird;Timeout=3;Command Timeout=10", builder.Environment.IsDevelopment());
+builder.Services.AddDbContext<IntegrationDbContext>(o => o.UseNpgsql(databaseConnection));
 builder.Services.AddScoped<HttpActor>();
 builder.Services.AddScoped<ICurrentActor>(sp => sp.GetRequiredService<HttpActor>());
 builder.Services.AddScoped<CreateOrderHandler>();
@@ -65,7 +99,10 @@ builder.Services.AddScoped<IQuotaStore, PostgresQuotaStore>();
 builder.Services.AddIntegrationMessaging(builder.Configuration, builder.Environment);
 builder.Services.AddAuthorization();
 var demo = builder.Configuration.GetValue<bool>("Authentication:DemoEnabled");
+var cognito = CognitoAuthentication.Read(builder.Configuration);
+var simulationEnabled = OrderSimulationEndpoints.IsEnabled(builder.Environment, builder.Configuration);
 if (demo && !builder.Environment.IsDevelopment()) throw new InvalidOperationException("Demo authentication is forbidden outside Development.");
+if (demo && cognito is not null) throw new InvalidOperationException("Demo authentication cannot be enabled with Cognito.");
 var demoKey = builder.Configuration["Authentication:DemoSigningKey"];
 if (demo && (string.IsNullOrWhiteSpace(demoKey) || demoKey.Length < 32)) throw new InvalidOperationException("Development demo requires Authentication:DemoSigningKey with at least 32 characters.");
 var auth = builder.Services.AddAuthentication(o => { o.DefaultAuthenticateScheme = "router"; o.DefaultChallengeScheme = "router"; })
@@ -81,6 +118,11 @@ var auth = builder.Services.AddAuthentication(o => { o.DefaultAuthenticateScheme
     })
     .AddJwtBearer("oidc", o =>
     {
+        if (cognito is not null)
+        {
+            cognito.Configure(o);
+            return;
+        }
         o.Authority = builder.Configuration["Authentication:Authority"] ?? "http://localhost:8080/realms/vortexbird";
         o.Audience = builder.Configuration["Authentication:Audience"] ?? "vortexbird-api";
         o.RequireHttpsMetadata = !builder.Environment.IsDevelopment() || builder.Configuration.GetValue("Authentication:RequireHttpsMetadata", false);
@@ -139,8 +181,27 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI(options => options.SwaggerEndpoint("/openapi/v1.json", "VortexBird API v1"));
 }
 app.MapGet("/health/live", () => Results.Ok(new { status = "live", service = "VortexBird.API" }));
-app.MapGet("/health/ready", async (IntegrationDbContext db, CancellationToken ct) => await db.Database.CanConnectAsync(ct) ? Results.Ok(new { status = "ready" }) : Results.StatusCode(503));
-app.MapGet("/api/v1/auth/config", () => new { demoEnabled = demo, authority = builder.Configuration["Authentication:PublicAuthority"] ?? builder.Configuration["Authentication:ValidIssuer"] ?? builder.Configuration["Authentication:Authority"] ?? "http://localhost:8080/realms/vortexbird", clientId = "vortexbird-portal" });
+app.MapGet("/health/ready", async (IntegrationDbContext db, CancellationToken ct) =>
+{
+    try
+    {
+        // A listening database is not sufficient when a deployment has not applied its schema.
+        var ready = await db.Database.CanConnectAsync(ct)
+            && !(await db.Database.GetPendingMigrationsAsync(ct)).Any();
+        return ready ? Results.Ok(new { status = "ready" }) : Results.StatusCode(503);
+    }
+    catch (System.Data.Common.DbException)
+    {
+        // The connection can fail between the reachability and migration-history checks.
+        return Results.StatusCode(503);
+    }
+});
+app.MapGet("/api/v1/auth/config", () => cognito?.PublicConfiguration(simulationEnabled) ?? new
+{
+    demoEnabled = demo, simulationEnabled, authority = builder.Configuration["Authentication:PublicAuthority"] ??
+        builder.Configuration["Authentication:ValidIssuer"] ?? builder.Configuration["Authentication:Authority"] ?? "http://localhost:8080/realms/vortexbird",
+    clientId = "vortexbird-portal"
+});
 if (demo)
 {
     app.MapPost("/api/v1/auth/demo-login", async (DemoLogin input, IntegrationDbContext db, IConfiguration config) =>
@@ -161,6 +222,7 @@ if (demo)
 var api = app.MapGroup("/api/v1").RequireAuthorization();
 api.MapGet("/auth/me", (HttpActor actor) => new { user = actor.User, permissions = actor.Permissions });
 api.MapOperationalEndpoints();
+if (simulationEnabled) api.MapOrderSimulationEndpoints();
 api.MapAdministrationEndpoints();
 api.MapDashboardEndpoints();
 api.MapPaymentEndpoints();

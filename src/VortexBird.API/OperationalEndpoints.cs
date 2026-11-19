@@ -133,14 +133,6 @@ public static class OperationalEndpoints
             var status = request.Query["status"].ToString(); if (status.Length > 0) q = q.Where(x => x.Status == status);
             return await Page(q.OrderByDescending(x => x.CreatedAt), request, ct);
         });
-        api.MapPost("/payments/{id:guid}/simulate", async (Guid id, PaymentOutcomeInput input, IntegrationDbContext db, HttpActor actor, OrderSaga saga, CancellationToken ct) =>
-        {
-            await actor.Require("payments.manage", ct);
-            var payment = await db.Payments.SingleOrDefaultAsync(x => x.Id == id, ct) ?? throw new MissingEntityException("Pago no encontrado.");
-            var order = await db.Orders.SingleAsync(x => x.Id == payment.OrderId, ct);
-            await actor.EnsurePartnerAccess(order.PartnerId, order.ChannelId, ct);
-            await saga.Resolve(payment.OrderId, input.Outcome, ct); return Results.Ok(new { status = input.Outcome });
-        });
         api.MapGet("/integrations", async (IntegrationDbContext db, HttpActor actor, HttpRequest request, CancellationToken ct) => { await actor.Require("integrations.read", ct); return await Page(db.Integrations.AsNoTracking().OrderBy(x => x.System), request, ct); });
         api.MapPut("/integrations/{id:guid}", async (Guid id, IntegrationInput input, IntegrationDbContext db, HttpActor actor, CancellationToken ct) =>
         {
@@ -241,12 +233,12 @@ public static class OperationalEndpoints
     public static async Task<PagedResult<T>> Page<T>(IQueryable<T> query, HttpRequest request, CancellationToken ct)
     {
         var page = int.TryParse(request.Query["page"], out var p) ? Math.Clamp(p, 1, 100000) : 1;
-        var size = int.TryParse(request.Query["pageSize"], out var s) ? Math.Clamp(s, 1, 100) : 20;
+        var size = int.TryParse(request.Query["pageSize"], out var s) ? Math.Clamp(s, 1, 100) : 10;
         return new PagedResult<T>(await query.Skip((page - 1) * size).Take(size).ToListAsync(ct), page, size, await query.CountAsync(ct));
     }
 }
 public record StockUpdate(int OnHand);
 public record PriceUpdate(decimal Amount, string Currency = "COP");
 public record IntegrationInput(string FailureMode);
-public record PaymentOutcomeInput(string Outcome);
+
 public record OrderStatusInput(string Status);

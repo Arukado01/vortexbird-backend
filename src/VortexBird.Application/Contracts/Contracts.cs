@@ -1,7 +1,8 @@
 namespace VortexBird.Application.Contracts;
 
 public record OrderLineRequest(string Sku, int Quantity);
-public record CreateOrderRequest(Guid PartnerId, Guid ChannelId, string StoreId, string CustomerId, List<OrderLineRequest> Items, string PaymentOutcome = "approved");
+[System.Text.Json.Serialization.JsonUnmappedMemberHandling(System.Text.Json.Serialization.JsonUnmappedMemberHandling.Disallow)]
+public record CreateOrderRequest(Guid PartnerId, Guid ChannelId, string StoreId, string CustomerId, List<OrderLineRequest> Items);
 public record PagedResult<T>(IReadOnlyList<T> Items, int Page, int PageSize, int TotalCount)
 {
     public int TotalPages => (int)Math.Ceiling(TotalCount / (double)PageSize);
@@ -18,7 +19,7 @@ public record PageRequest(int Page = 1, int PageSize = 20, string? Search = null
 
 public record StockResult(string Sku, string StoreId, Guid ChannelId, int OnHand, int Reserved, int Available, DateTimeOffset AsOf, bool Stale = false);
 public record PriceResult(string Sku, Guid ChannelId, string? CustomerId, decimal Amount, string Currency, DateTimeOffset AsOf);
-public record PaymentRequest(Guid OrderId, Guid PartnerId, decimal Amount, string Currency, string IdempotencyKey, string SimulationOutcome = "approved");
+public record PaymentRequest(Guid OrderId, Guid PartnerId, decimal Amount, string Currency, string IdempotencyKey);
 public record PaymentResult(string Reference, string Status, string Provider, bool Simulated);
 public record AdapterHealth(string System, bool Available, double LatencyMs, string Mode, string? Error);
 public record UserContext(string Subject, Guid? PartnerId, IReadOnlySet<Guid> ChannelIds, IReadOnlySet<string> Permissions);

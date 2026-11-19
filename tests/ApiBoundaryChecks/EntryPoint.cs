@@ -20,6 +20,8 @@ using Microsoft.IdentityModel.Protocols;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using Microsoft.IdentityModel.Tokens;
 using VortexBird.Infrastructure.Payments;
+using VortexBird.Application.Contracts;
+using Microsoft.AspNetCore.Routing;
 
 namespace VortexBird.QA.ApiBoundary;
 
@@ -38,6 +40,7 @@ public static class EntryPoint
         Environment.SetEnvironmentVariable("Authentication__DemoEnabled", "false");
         Environment.SetEnvironmentVariable("Authentication__Authority", issuer);
         Environment.SetEnvironmentVariable("ASPNETCORE_ENVIRONMENT", "Production");
+        Environment.SetEnvironmentVariable("ConnectionStrings__Database", "Host=127.0.0.1;Port=59999;Database=vortexbird;Username=vortexbird;SSL Mode=VerifyFull;Timeout=1;Command Timeout=1");
 
         await using var factory = new WebApplicationFactory<global::Program>().WithWebHostBuilder(builder =>
         {
@@ -48,7 +51,7 @@ public static class EntryPoint
                 ["Workers:Enabled"] = "false", ["Database:Initialize"] = "false",
                 ["Authentication:DemoEnabled"] = "false", ["Authentication:Authority"] = issuer,
                 ["Authentication:Audience"] = "vortexbird-api", ["Authentication:ValidIssuer"] = issuer,
-                ["ConnectionStrings:Database"] = "Host=127.0.0.1;Port=59999;Database=vortexbird;Username=vortexbird;Timeout=1;Command Timeout=1"
+                ["ConnectionStrings:Database"] = "Host=127.0.0.1;Port=59999;Database=vortexbird;Username=vortexbird;SSL Mode=VerifyFull;Timeout=1;Command Timeout=1"
             }));
             // Only discovery transport is replaced: the API's JWT validation flags,
             // audience, issuer, middleware and routes remain the production code.
@@ -113,6 +116,30 @@ public static class EntryPoint
         await Check("Unknown signing key rejected", () => Denied(Token(issuer, "vortexbird-api", DateTime.UtcNow.AddMinutes(5), new SigningCredentials(new RsaSecurityKey(otherRsa) { KeyId = "untrusted" }, SecurityAlgorithms.RsaSha256))));
         await Check("Production liveness is public", async () => (await client.GetAsync("/health/live")).StatusCode == HttpStatusCode.OK);
         await Check("Production has no demo-login endpoint", async () => (await client.PostAsync("/api/v1/auth/demo-login", new StringContent("{}", Encoding.UTF8, "application/json"))).StatusCode == HttpStatusCode.NotFound);
+        await Check("Production does not register order or payment simulation endpoints", () =>
+        {
+            var endpoints = factory.Services.GetRequiredService<EndpointDataSource>().Endpoints.OfType<RouteEndpoint>();
+            return Task.FromResult(!endpoints.Any(endpoint => endpoint.RoutePattern.RawText is "/api/v1/simulations/orders" or "/api/v1/payments/{id:guid}/simulate"));
+        });
+        await Check("Public order JSON rejects a simulation field even with different casing", () =>
+        {
+            var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+            var valid = JsonSerializer.Serialize(new CreateOrderRequest(Guid.NewGuid(), Guid.NewGuid(), "S", "C", [new("SKU", 1)]), options);
+            if (JsonSerializer.Deserialize<CreateOrderRequest>(valid, options)?.Items.Count != 1) return Task.FromResult(false);
+            foreach (var field in new[] { "paymentOutcome", "PAYMENTOUTCOME", "simulatedOutcome" })
+            {
+                try { _ = JsonSerializer.Deserialize<CreateOrderRequest>(valid.Insert(1, $"\"{field}\":\"approved\","), options); return Task.FromResult(false); }
+                catch (JsonException) { }
+            }
+            return Task.FromResult(true);
+        });
+        await Check("Development sandbox does not enable simulation endpoints", () =>
+        {
+            var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Payments:Provider"] = "MercadoPagoSandbox" }).Build();
+            var environment = new Microsoft.Extensions.Hosting.Internal.HostingEnvironment { EnvironmentName = "Development" };
+            return Task.FromResult(!VortexBird.API.OrderSimulationEndpoints.IsEnabled(environment, configuration)
+                && VortexBird.API.OrderSimulationEndpoints.IsEnabled(environment, new ConfigurationBuilder().Build()));
+        });
         await Check("Production OpenAPI endpoint is not exposed", async () => (await client.GetAsync("/openapi/v1.json")).StatusCode == HttpStatusCode.NotFound);
         await Check("Production Swagger UI is not exposed", async () => (await client.GetAsync("/swagger/index.html")).StatusCode == HttpStatusCode.NotFound);
         await Check("Development Swagger UI loads its generated document with Bearer authorization", async () =>
@@ -130,6 +157,10 @@ public static class EntryPoint
             var scheme = rootElement.GetProperty("components").GetProperty("securitySchemes").GetProperty("Bearer");
             var paths = rootElement.GetProperty("paths");
             var orderSecurity = paths.GetProperty("/api/v1/orders").GetProperty("get").GetProperty("security");
+            var orderRequest = paths.GetProperty("/api/v1/orders").GetProperty("post").GetProperty("requestBody");
+            if (orderRequest.GetRawText().Contains("paymentOutcome", StringComparison.OrdinalIgnoreCase)
+                || rootElement.GetProperty("components").GetRawText().Contains("paymentOutcome", StringComparison.OrdinalIgnoreCase)
+                || paths.TryGetProperty("/api/v1/simulations/orders", out _)) return false;
             return scheme.GetProperty("scheme").GetString() == "bearer"
                 && orderSecurity[0].TryGetProperty("Bearer", out _)
                 && !paths.GetProperty("/health/live").GetProperty("get").TryGetProperty("security", out _);
@@ -138,7 +169,8 @@ public static class EntryPoint
         {
             using var response = await client.GetAsync("/api/v1/auth/config");
             using var config = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-            return response.IsSuccessStatusCode && config.RootElement.GetProperty("demoEnabled").GetBoolean() == false;
+            return response.IsSuccessStatusCode && !config.RootElement.GetProperty("demoEnabled").GetBoolean()
+                && !config.RootElement.GetProperty("simulationEnabled").GetBoolean();
         });
         const string callbackPath = "/api/v1/payments/mercadopago/webhook";
         await Check("Disabled payment callback has no public acceptance path", async () =>
@@ -181,6 +213,59 @@ public static class EntryPoint
         await Check("Signed callback rejects a different seller", () => CallbackReject(notification.Replace("123", "321"), HttpStatusCode.BadRequest, SignCallback()));
         await Check("Signed callback bounds declared request size", () => CallbackReject(new string(' ', 32769), HttpStatusCode.RequestEntityTooLarge, SignCallback()));
         await Check("Signed callback bounds unknown-length streamed body", () => CallbackReject(new string(' ', 40000), HttpStatusCode.RequestEntityTooLarge, SignCallback(), streamed: true));
+        const string cognitoIssuer = "https://cognito-idp.us-east-2.amazonaws.com/us-east-2_QAPool123";
+        const string cognitoClient = "qacognito123";
+        const string cognitoScope = "vortexbird-api/access";
+        var cognitoConfiguration = new OpenIdConnectConfiguration { Issuer = cognitoIssuer };
+        cognitoConfiguration.SigningKeys.Add(key);
+        // Startup selects the provider before WebApplicationFactory applies its service overrides.
+        Environment.SetEnvironmentVariable("Authentication__Provider", "Cognito");
+        Environment.SetEnvironmentVariable("Authentication__Authority", cognitoIssuer);
+        Environment.SetEnvironmentVariable("Authentication__Cognito__ClientId", cognitoClient);
+        Environment.SetEnvironmentVariable("Authentication__Cognito__AuthorizationOrigin", "https://qa.auth.us-east-2.amazoncognito.com");
+        await using var cognitoFactory = factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureTestServices(services => services.PostConfigure<JwtBearerOptions>("oidc", options =>
+            {
+                options.Configuration = cognitoConfiguration;
+                options.ConfigurationManager = new StaticConfigurationManager<OpenIdConnectConfiguration>(cognitoConfiguration);
+                var validate = options.Events.OnTokenValidated;
+                options.Events.OnTokenValidated = async context =>
+                {
+                    await validate(context);
+                    if (context.Result?.Failure is null && context.Principal?.FindFirst("identity_type")?.Value == "human" &&
+                        !context.Principal.HasClaim(claim => claim.Type is "partner_id" or "channel_id"))
+                        context.Response.Headers["X-QA-Cognito-Accepted"] = "true";
+                };
+            }));
+        });
+        using var cognitoClientHttp = cognitoFactory.CreateClient();
+        await Check("Cognito discovery publishes the current client and authorization origin", async () =>
+        {
+            using var response = await cognitoClientHttp.GetAsync("/api/v1/auth/config");
+            using var config = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            return response.IsSuccessStatusCode && config.RootElement.GetProperty("provider").GetString() == "cognito"
+                && config.RootElement.GetProperty("clientId").GetString() == cognitoClient
+                && config.RootElement.GetProperty("authorizationOrigin").GetString() == "https://qa.auth.us-east-2.amazoncognito.com";
+        });
+        async Task<bool> CognitoToken(string tokenUse, string clientId, string scope, bool accepted)
+        {
+            var jwt = new JwtSecurityToken(cognitoIssuer, audience: null,
+                [new("sub", Guid.NewGuid().ToString("D")), new("token_use", tokenUse), new("client_id", clientId), new("scope", scope),
+                    new("identity_type", "untrusted"), new("partner_id", Guid.NewGuid().ToString("D"))],
+                expires: DateTime.UtcNow.AddMinutes(2), signingCredentials: new SigningCredentials(key, SecurityAlgorithms.RsaSha256));
+            using var request = new HttpRequestMessage(HttpMethod.Get, accepted ? "/health/live" : "/api/v1/auth/me");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", new JwtSecurityTokenHandler().WriteToken(jwt));
+            using var response = await cognitoClientHttp.SendAsync(request);
+            return accepted
+                ? response.IsSuccessStatusCode && response.Headers.Contains("X-QA-Cognito-Accepted")
+                : response.StatusCode == HttpStatusCode.Unauthorized && !response.Headers.Contains("X-QA-Cognito-Accepted");
+        }
+        await Check("Cognito access token binds client_id and scope, using database authorization claims", () => CognitoToken("access", cognitoClient, cognitoScope, true));
+        await Check("Cognito rejects ID tokens, other app clients and missing API scope", async () =>
+            await CognitoToken("id", cognitoClient, cognitoScope, false) &&
+            await CognitoToken("access", "otherclient123", cognitoScope, false) &&
+            await CognitoToken("access", cognitoClient, "openid", false));
         var path = Environment.GetEnvironmentVariable("QA_API_RESULTS_PATH") ?? Path.Combine(root, "test-results/api-boundary-results.json");
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         await File.WriteAllTextAsync(path, JsonSerializer.Serialize(new { measuredAt = DateTimeOffset.UtcNow, transport = "ASP.NET TestServer (in memory)", oidcDiscovery = "static ephemeral RSA fixture; real JWT validation middleware", paymentCallback = "real callback rejection paths; no accepted/durable receipt or provider call", databaseRequired = false, passed = results.Count - failures, failed = failures, results }, new JsonSerializerOptions { WriteIndented = true }));

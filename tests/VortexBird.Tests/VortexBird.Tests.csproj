@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/VortexBird.Infrastructure/VortexBird.Infrastructure.csproj" />
+    <ProjectReference Include="../../src/VortexBird.API/VortexBird.API.csproj" />
   </ItemGroup>
 
   <ItemGroup>

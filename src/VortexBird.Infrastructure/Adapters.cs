@@ -110,9 +110,13 @@ public sealed class OmsOrderAdapter(IntegrationDbContext db, SimulatorGuard guar
 public sealed class SimulatedPaymentGateway(IntegrationDbContext db, SimulatorGuard guard) : IPaymentGateway
 {
     public string Provider => "simulator";
-    public Task<PaymentResult> Initiate(PaymentRequest request, CancellationToken ct = default) => guard.Execute("Payment Gateway", "initiate-payment", () =>
+    public Task<PaymentResult> Initiate(PaymentRequest request, CancellationToken ct = default) =>
+        InitiateSimulation(request, "approved", ct);
+
+    public Task<PaymentResult> InitiateSimulation(PaymentRequest request, string simulatedOutcome, CancellationToken ct) =>
+        guard.Execute("Payment Gateway", "initiate-payment", () =>
     {
-        var outcome = request.SimulationOutcome.ToLowerInvariant();
+        var outcome = simulatedOutcome.ToLowerInvariant();
         if (outcome == "unavailable") throw new HttpRequestException("Pasarela simulada no disponible.");
         if (outcome is not ("approved" or "rejected" or "pending")) throw new DomainException("invalid_outcome", "Resultado de pago inválido.");
         return Task.FromResult(new PaymentResult($"sim-{request.OrderId:N}", outcome, Provider, true));
