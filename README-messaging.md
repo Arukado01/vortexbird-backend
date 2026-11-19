@@ -20,13 +20,15 @@ Un timeout de publicación es ambiguo: SQS podría haber aceptado el mensaje. La
 
 ## SDK y protocolo
 
-`AWSSDK.Core 4.0.102.19` proporciona `AmazonServiceClient`, cadena de credenciales, firma SigV4, transporte HTTP, clock-skew y reintentos. El código del proyecto únicamente serializa las cuatro operaciones JSON documentadas: SendMessage, ReceiveMessage, DeleteMessage y ChangeMessageVisibility. **No contiene una implementación propia de SigV4.** El paquete específico `AWSSDK.SQS` no estaba disponible en el cache y su descarga fue bloqueada; reemplazar este pequeño binding por el cliente de servicio oficial es una evolución compatible con `IQueueTransport`.
+La infraestructura utiliza `AWSSDK.SQS` 4.0.100.26, que resuelve `AWSSDK.Core` 4.0.103. `AmazonSQSClient` serializa y firma SendMessage, ReceiveMessage, DeleteMessage y ChangeMessageVisibility. `IQueueTransport` mantiene a los casos de uso independientes del SDK. El adaptador valida el envelope y procesa una entrega por lectura, con polling de 20 s y un timeout de 30 s.
 
-La URL productiva debe ser `https://sqs.<región>.amazonaws.com/<cuenta de 12 dígitos>/<cola>`, concordante con la región configurada. Se rechazan redirects, userinfo y destinos arbitrarios. La respuesta y el envelope tienen límites de bytes. El `ServiceUrl` de emulación solo se admite en Development, por HTTP, para localhost/127.0.0.1/elasticmq y con el mismo origen que QueueUrl. El cliente local usa credenciales dummy dedicadas y nunca resuelve credenciales AWS reales del equipo.
+La URL en AWS sigue el patrón `https://sqs.<región>.amazonaws.com/<cuenta>/<cola>`. La configuración de producción usa el endpoint regional del SDK. `ServiceUrl` se admite en Development para localhost, 127.0.0.1 o elasticmq con el mismo origen que la cola, sin query, credenciales ni fragmentos. El emulador recibe credenciales locales de prueba.
 
-### Credenciales EKS
+### Identidad AWS
 
-La cadena oficial admite credenciales temporales del runtime. **IRSA requiere además `AWSSDK.SecurityToken`, ausente en este entorno**: se verificó el fallo de carga del assembly antes de cualquier solicitud. Configurar EKS Pod Identity/credenciales de contenedor con el agente oficial es una alternativa; debe validarse en AWS después de aprobar el despliegue. No declarar IRSA operativo sin incluir y probar el paquete STS oficial. No introducir claves AWS permanentes en Git ni variables del frontend.
+El piloto ECS asigna al Task Role del worker las cuatro acciones sobre la cola de eventos. El Execution Role inyecta solo el secreto del worker. El SDK obtiene credenciales temporales de contenedor mediante la cadena de proveedores. API y frontend tienen Task Roles separados y carecen de permisos sobre SQS.
+
+EKS conserva Pod Identity como alternativa. IRSA requiere además AWSSDK.SecurityToken y una validación propia, pendiente para ese entorno.
 
 ## Configuración
 
@@ -50,7 +52,13 @@ Messaging__QueueUrl=http://elasticmq:9324/000000000000/vortexbird-events
 
 ## Verificación
 
-`tests/MessagingChecks`: veinte verificaciones de orquestación sin red: ack posterior a persistencia, duplicados, leases, fallos de handler/ack, poison messages, tamaño UTF-8 y metadatos EF. `tests/SqsTransportChecks` verifica el pipeline real AWS Core con un HTTP handler de prueba; sus resultados deben leerse en el informe actualizado. Las pruebas sin sockets no equivalen a una ejecución contra SQS, ElasticMQ o PostgreSQL conectado por Npgsql.
+`tests/MessagingChecks`: veinte verificaciones de orquestación sin red: ack posterior a persistencia, duplicados, leases, fallos de handler/ack, poison messages, tamaño UTF-8 y metadatos EF. `tests/SqsTransportChecks` ejecuta el SDK de servicio oficial con un HTTP handler de prueba; sus resultados deben leerse en el informe actualizado. Para verificar también el protocolo en un proceso ElasticMQ dedicado y enlazado exclusivamente a loopback:
+
+`powershell
+dotnet run --project tests/SqsTransportChecks -- --elasticmq=http://127.0.0.1:19324
+`
+
+La prueba crea una cola y una DLQ efímeras. Comprueba visibilidad y reentrega, acuse, agotamiento y republicación controlada. El emulador no acredita StartMessageMoveTask, permisos IAM ni persistencia PostgreSQL del consumidor.
 
 Fuentes oficiales consultadas:
 

@@ -1,7 +1,9 @@
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Amazon.Runtime;
+using Amazon.SQS;
 using VortexBird.Infrastructure.Messaging;
 
 var results = new List<object>();
@@ -15,22 +17,28 @@ void True(bool condition) { if (!condition) throw new Exception("Assertion faile
 const string queueUrl = "https://sqs.us-east-2.amazonaws.com/123456789012/qa-events";
 var options = new MessagingOptions { Provider = "sqs", Region = "us-east-2", QueueUrl = queueUrl, VisibilityTimeoutSeconds = 120 };
 var message = new IntegrationEnvelope(Guid.NewGuid(), Guid.NewGuid(), "order.created", 1, "{\"orderId\":\"12345678-1234-1234-1234-123456789012\",\"label\":\"café\"}", "qa-trace", DateTimeOffset.Parse("2026-11-13T00:00:00Z"));
-SqsJsonClient Client(FixtureHandler handler)
+var emulatorUrl = args.FirstOrDefault(arg => arg.StartsWith("--elasticmq=", StringComparison.Ordinal))?[12..];
+var emulatorOnly = args.Contains("--emulator-only", StringComparer.Ordinal);
+if (emulatorOnly && emulatorUrl is null) throw new ArgumentException("--emulator-only requires --elasticmq=<loopback origin>.");
+if (emulatorOnly) return await FinishChecks();
+
+AmazonSQSClient Client(FixtureHandler handler)
 {
     var config = MessagingRegistration.BuildClientConfig(options, development: false);
     config.MaxErrorRetry = 0;
     config.HttpClientFactory = new FixtureHttpClientFactory(handler);
-    return new SqsJsonClient(new SessionAWSCredentials("QA-ACCESS-KEY-NOT-REAL", "qa-secret-not-a-credential", "qa-session-not-a-credential"), config);
+    return new AmazonSQSClient(new SessionAWSCredentials("QA-ACCESS-KEY-NOT-REAL", "qa-secret-not-a-credential", "qa-session-not-a-credential"), config);
 }
 var body = JsonSerializer.Serialize(message, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+var bodyMd5 = Convert.ToHexString(MD5.HashData(Encoding.UTF8.GetBytes(body))).ToLowerInvariant();
 using var handler = new FixtureHandler([
     (HttpStatusCode.OK,"{\"MessageId\":\"aws-message-1\"}"),
-    (HttpStatusCode.OK,JsonSerializer.Serialize(new { Messages = new[] { new { ReceiptHandle = "opaque-receipt", Body = body, Attributes = new { ApproximateReceiveCount = "3" } } } })),
+    (HttpStatusCode.OK,JsonSerializer.Serialize(new { Messages = new[] { new { ReceiptHandle = "opaque-receipt", Body = body, MD5OfBody = bodyMd5, Attributes = new { ApproximateReceiveCount = "3" } } } })),
     (HttpStatusCode.OK,"{}"),(HttpStatusCode.OK,"{}")
 ]);
 using var client = Client(handler);
 var transport = new SqsQueueTransport(client, options);
-await Check("Official AWS Core signs and unmarshals SendMessage without a socket", async () => {
+await Check("Official AmazonSQSClient signs and unmarshals SendMessage without a socket", async () => {
     await transport.Publish(message, CancellationToken.None);
     True(handler.Calls.Count == 1);
     var call = handler.Calls[0];
@@ -81,17 +89,39 @@ await Check("An empty receive batch is represented without invented events", asy
     using var http=new FixtureHandler([(HttpStatusCode.OK,"{}")]); using var aws=Client(http);
     True((await new SqsQueueTransport(aws,options).Receive(CancellationToken.None)).Count==0);
 });
-await Check("Unsupported AWS operation is rejected before HTTP", async () => {
-    using var http=new FixtureHandler([]); using var aws=Client(http);
-    try { await aws.Send("DeleteQueue",new {QueueUrl=queueUrl},CancellationToken.None); }
-    catch(ArgumentException) { True(http.Calls.Count==0); return; }
-    throw new Exception("Unsupported operation reached transport");
+await Check("Only Development can configure an emulator origin", () =>
+{
+    var local = new MessagingOptions { Provider = "sqs", Region = "us-east-2", QueueUrl = "http://elasticmq:9324/000000000000/demo", ServiceUrl = "http://elasticmq:9324" };
+    var config = MessagingRegistration.BuildClientConfig(local, development: true);
+    True(new Uri(config.ServiceURL).GetLeftPart(UriPartial.Authority) == "http://elasticmq:9324" && config.AuthenticationRegion == "us-east-2");
+    try { MessagingRegistration.BuildClientConfig(local, development: false); }
+    catch (InvalidOperationException) { return Task.CompletedTask; }
+    throw new Exception("Production emulator endpoint was accepted.");
 });
-var report=JsonSerializer.Serialize(new {measuredAt=DateTimeOffset.UtcNow,transport="Official AWS Core signing/marshalling pipeline with fake HttpMessageHandler and synthetic session credentials",awsContacted=false,passed=results.Count-failures,failed=failures,results},new JsonSerializerOptions{WriteIndented=true});
-var output=args.FirstOrDefault(x=>x.StartsWith("--report="))?[9..];
-if(output is not null){Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!);File.WriteAllText(output,report);}
-Console.WriteLine($"{results.Count-failures}/{results.Count} SQS transport checks passed; AWS was not contacted.");
-return failures==0?0:1;
+return await FinishChecks();
+
+async Task<int> FinishChecks()
+{
+    (string QueueUrl, string DeadLetterQueueUrl)? queues = null;
+    if (emulatorUrl is not null)
+        await Check("Create dedicated ElasticMQ queues for this run", async () =>
+        {
+            queues = await ElasticMqChecks.Run(emulatorUrl, message, Check);
+        });
+    var report = JsonSerializer.Serialize(new
+    {
+        measuredAt = DateTimeOffset.UtcNow,
+        transport = emulatorOnly ? "Official AWSSDK.SQS with loopback ElasticMQ"
+            : emulatorUrl is null ? "Official AWSSDK.SQS with an isolated HTTP fixture" : "Official AWSSDK.SQS with an isolated HTTP fixture and loopback ElasticMQ",
+        emulatorAttempted = emulatorUrl is not null, awsContacted = false,
+        queueUrl = queues?.QueueUrl, deadLetterQueueUrl = queues?.DeadLetterQueueUrl,
+        passed = results.Count - failures, failed = failures, results
+    }, new JsonSerializerOptions { WriteIndented = true });
+    var output = args.FirstOrDefault(x => x.StartsWith("--report=", StringComparison.Ordinal))?[9..];
+    if (output is not null) { Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(output))!); File.WriteAllText(output, report); }
+    Console.WriteLine($"{results.Count - failures}/{results.Count} SQS transport checks passed; AWS was not contacted.");
+    return failures == 0 ? 0 : 1;
+}
 
 sealed record HttpCall(string Method,string Url,string Target,string ContentType,string Authorization,string AmzDate,string SessionToken,string Body);
 sealed class FixtureHttpClientFactory(FixtureHandler handler) : Amazon.Runtime.HttpClientFactory

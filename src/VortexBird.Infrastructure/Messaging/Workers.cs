@@ -21,7 +21,13 @@ public sealed class IntegrationEventHandler(IntegrationDbContext db, OrderSaga s
         {
             var id = orderId.GetGuid();
             if (!await db.Orders.AnyAsync(x => x.Id == id && x.PartnerId == message.PartnerId, ct)) throw new InvalidDataException("Order is not owned by the event partner.");
-            if (message.Type == "order.created") await saga.Advance(id, data.RootElement.GetProperty("paymentOutcome").GetString()!.ToLowerInvariant(), ct);
+            if (message.Type == "order.created")
+            {
+                // Unprocessed outbox rows from older versions used paymentOutcome.
+                var hasSimulation = data.RootElement.TryGetProperty("simulatedOutcome", out var simulation)
+                    || data.RootElement.TryGetProperty("paymentOutcome", out simulation);
+                await saga.Advance(id, hasSimulation ? simulation.GetString() : null, ct);
+            }
             if (message.Type is "order.confirmed" or "shipment.started" or "delivery.confirmed") await oms.SynchronizeOrder(id, ct);
         }
         else if (message.Type == "order.created") throw new InvalidDataException("Order event has no order identifier.");
