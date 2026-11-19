@@ -1,4 +1,4 @@
-name: Deploy reviewed backend
+name: Publish backend image with optional EKS rollout
 on:
   workflow_dispatch:
 permissions:
@@ -24,7 +24,8 @@ jobs:
           test -n "$REPOSITORY"
           docker build -t "$REGISTRY/$REPOSITORY:$GITHUB_SHA" .
           docker push "$REGISTRY/$REPOSITORY:$GITHUB_SHA"
-      - name: Deploy with rollback
+      - name: Deploy the EKS alternative with rollback
+        if: vars.DEPLOYMENT_TARGET == 'eks'
         env:
           CLUSTER: ${{ vars.EKS_CLUSTER_NAME }}
           REGISTRY: ${{ steps.ecr.outputs.registry }}
