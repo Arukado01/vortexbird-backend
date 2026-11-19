@@ -38,10 +38,6 @@ public static class CreateOrderRequestValidator
             RequiredLength("storeId", request.StoreId, 80);
             RequiredLength("customerId", request.CustomerId, 120);
 
-            var supportedOutcomes = new[] { "approved", "rejected", "pending", "unavailable" };
-            if (request.PaymentOutcome is null || !supportedOutcomes.Contains(request.PaymentOutcome, StringComparer.OrdinalIgnoreCase))
-                Error("paymentOutcome", "Resultado simulado no permitido: approved, rejected, pending o unavailable.");
-
             if (request.Items is null || request.Items.Count == 0)
                 Error("items", "La orden debe contener al menos un producto.");
             else if (request.Items.Count > MaximumLines)

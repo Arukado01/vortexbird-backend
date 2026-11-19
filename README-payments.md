@@ -4,7 +4,7 @@ El flujo está implementado y conectado a `IPaymentGateway`, conservando **Simul
 
 ## Flujo implementado
 
-1. La orden y sus reservas se crean atómicamente con `order.created`. El consumidor llama la saga. El proveedor externo ignora `SimulationOutcome`; ese campo solo afecta al simulador.
+1. La orden y sus reservas se crean atómicamente con `order.created`. El consumidor inicia la saga. El contrato público rechaza `paymentOutcome`. Las rutas de simulación se registran exclusivamente en Development con Simulator. El proveedor externo recibe un `PaymentRequest` sin resultado simulado.
 2. Antes del POST de preferencias se guardan `PaymentCheckout` y `Payment` con la referencia `partnerId:orderId`, importe y moneda del servidor, vencimiento de reserva y lease. Un bloqueo transaccional por orden impide crear dos intenciones.
 3. Se comprueba `/users/me`: ID configurado y etiqueta `test_user`. El prefijo `APP_USR` no identifica una cuenta de pruebas. Solo entonces se crea el checkout alojado, con vencimiento de hasta quince minutos, sin recibir datos de tarjeta.
 4. La URL se persiste y solo se expone mientras la orden tiene reserva/pago pendiente y no ha expirado. Si se pierde la respuesta, queda `unknown`. **El POST no se repite**: la búsqueda por referencia recupera y verifica preferencia, vendedor, importe, moneda y vencimiento. Ausencia o ambigüedad nunca autoriza otra creación automática.
@@ -69,3 +69,7 @@ Se eligió Checkout Pro Preferences para materializar el contrato de checkout al
 - [Reembolso e idempotencia](https://www.mercadopago.com.co/developers/en/reference/online-payments/checkout-pro/create-refund/post)
 - [Notificaciones y recurso autoritativo](https://www.mercadopago.com.co/developers/es/docs/checkout-pro-orders/resources/notifications/webhooks)
 - [Manifest HMAC](https://www.mercadopago.com.co/developers/es/docs/checkout-api-orders/optional-notifications)
+
+### Verificación concurrente de la simulación (17-11-2026)
+
+La resolución del simulador relee orden y pago después de adquirir el lock de la orden. Las entidades cargadas durante la autorización no pueden conservar un estado pendiente anterior a otra resolución. La prueba `tests/Integration.ps1` intenta ocho aprobaciones simultáneas: debe aceptar una y devolver conflicto para las otras siete, con una sola transición final. Su ejecución integrada está pendiente en esta sesión por el bloqueo de sockets locales (10013); no se sustituyó por una prueba de pagos productivos.

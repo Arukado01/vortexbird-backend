@@ -24,11 +24,12 @@ public sealed class GetOrderHandler(IntegrationDbContext db, ICurrentActor actor
 
 public static class RequestFingerprint
 {
-    public static string For(CreateOrderRequest request) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+    public static string For(CreateOrderRequest request, string? simulatedOutcome = null) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
     {
         request.PartnerId, request.ChannelId, request.StoreId, request.CustomerId,
         Items = request.Items.OrderBy(x => x.Sku, StringComparer.Ordinal).Select(x => new { x.Sku, x.Quantity }),
-        request.PaymentOutcome
+        // Keep existing hashes for requests created with the default simulation outcome.
+        PaymentOutcome = simulatedOutcome ?? "approved"
     }))));
 }
 
@@ -40,7 +41,7 @@ public sealed class CreateOrderHandler(IntegrationDbContext db, ICurrentActor ac
         CreateOrderRequestValidator.ValidateAndThrow(request);
         if (string.IsNullOrWhiteSpace(command.Key) || command.Key.Length > 128) throw new DomainException("invalid_idempotency_key", "Idempotency-Key es obligatorio y debe tener hasta 128 caracteres.");
         await actor.EnsurePartnerAccess(request.PartnerId, request.ChannelId, ct);
-        var hash = RequestFingerprint.For(request);
+        var hash = RequestFingerprint.For(request, command.SimulatedOutcome);
         // A database advisory transaction lock serializes equal tenant/key attempts across replicas.
         await using var transaction = await db.Database.BeginTransactionAsync(IsolationLevel.ReadCommitted, ct);
         await db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock(hashtextextended({request.PartnerId + ":" + command.Key}, 0))", ct);
@@ -71,7 +72,10 @@ public sealed class CreateOrderHandler(IntegrationDbContext db, ICurrentActor ac
         db.RecordOrderTransition(order, OrderStates.Reserved, "Inventario reservado; procesamiento asíncrono de pago en cola.", DateTimeOffset.UtcNow);
         var receipt = new OrderReceipt(order.Id, order.Status, order.PaymentStatus, order.Total, order.Currency, order.CorrelationId);
         db.IdempotencyRecords.Add(new IdempotencyRecord { PartnerId = request.PartnerId, Key = command.Key, RequestHash = hash, State = "completed", OrderId = order.Id, ResponseJson = JsonSerializer.Serialize(receipt), ExpiresAt = DateTimeOffset.UtcNow.AddHours(24) });
-        db.OutboxMessages.Add(new OutboxMessage { PartnerId = order.PartnerId, Type = "order.created", CorrelationId = order.CorrelationId, Payload = JsonSerializer.Serialize(new { orderId = order.Id, paymentOutcome = request.PaymentOutcome }) });
+        var payload = command.SimulatedOutcome is { } simulated
+            ? JsonSerializer.Serialize(new { orderId = order.Id, simulatedOutcome = simulated })
+            : JsonSerializer.Serialize(new { orderId = order.Id });
+        db.OutboxMessages.Add(new OutboxMessage { PartnerId = order.PartnerId, Type = "order.created", CorrelationId = order.CorrelationId, Payload = payload });
         db.ActivityLogs.Add(new ActivityLog { UserId = actor.Subject, PartnerId = order.PartnerId, ChannelId = order.ChannelId, Action = "create", Module = "orders", EntityId = order.Id.ToString(), CorrelationId = order.CorrelationId, Description = "Orden y reserva creadas de forma atómica; procesamiento de pago pendiente." });
         await db.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
@@ -81,19 +85,22 @@ public sealed class CreateOrderHandler(IntegrationDbContext db, ICurrentActor ac
 
 public sealed partial class OrderSaga(IntegrationDbContext db, IPaymentGateway gateway, IInventoryAdapter inventory)
 {
-    public async Task Advance(Guid orderId, string outcome, CancellationToken ct)
+    public async Task Advance(Guid orderId, string? simulatedOutcome, CancellationToken ct)
     {
         db.ChangeTracker.Clear();
         var snapshot = await db.Orders.AsNoTracking().SingleAsync(x => x.Id == orderId, ct);
         if (snapshot.Status != OrderStates.Reserved) return;
         // Provider call is outside SQL transaction; stable operation key enables safe reconciliation/replay.
-        var result = await gateway.Initiate(new PaymentRequest(snapshot.Id, snapshot.PartnerId, snapshot.Total, snapshot.Currency, $"payment:{snapshot.Id}", outcome.ToLowerInvariant()), ct);
+        var request = new PaymentRequest(snapshot.Id, snapshot.PartnerId, snapshot.Total, snapshot.Currency, $"payment:{snapshot.Id}");
+        var result = gateway is SimulatedPaymentGateway simulator
+            ? await simulator.InitiateSimulation(request, simulatedOutcome ?? "approved", ct)
+            : await gateway.Initiate(request, ct);
         db.ChangeTracker.Clear();
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         await db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock(hashtextextended({orderId.ToString()}, 0))", ct);
         var order = await db.Orders.Include(x => x.Timeline).SingleAsync(x => x.Id == orderId, ct);
         if (order.Status != OrderStates.Reserved) return;
-        outcome = result.Status;
+        var outcome = result.Status;
         db.RecordOrderTransition(order, OrderStates.AwaitingPayment, result.Simulated ? "Intención de pago creada en simulador explícito." : "Checkout sandbox persistido; esperando confirmación verificada del proveedor.", DateTimeOffset.UtcNow);
         var payment = await db.Payments.SingleOrDefaultAsync(x => x.OrderId == order.Id, ct);
         if (payment is null)
@@ -109,6 +116,9 @@ public sealed partial class OrderSaga(IntegrationDbContext db, IPaymentGateway g
     public async Task Resolve(Guid orderId, string outcome, CancellationToken ct)
     {
         if (outcome is not ("approved" or "rejected")) throw new DomainException("invalid_outcome", "Resultado inválido.");
+        // The endpoint loads payment/order for authorization before the lock. Do not reuse
+        // those snapshots after another request may have settled the same order.
+        db.ChangeTracker.Clear();
         await using var tx = await db.Database.BeginTransactionAsync(ct);
         await db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock(hashtextextended({orderId.ToString()}, 0))", ct);
         var order = await db.Orders.Include(x => x.Timeline).SingleAsync(x => x.Id == orderId, ct);
